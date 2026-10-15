@@ -11,7 +11,7 @@ import unicodedata
 import sqlite3
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 from dotenv import load_dotenv
 
@@ -257,34 +257,87 @@ class Confirm(discord.ui.View):
 
 
 async def publish_portals():
-    for channel_id in VIGILE_CHANNELS:
+    for channel_id in sorted(VIGILE_CHANNELS):
         await ensure_portal(channel_id)
 
 
-async def ensure_portal(channel_id):
+async def ensure_portal(channel_id: int) -> str:
     lock = portal_publish_locks.setdefault(channel_id, asyncio.Lock())
     async with lock:
         channel = bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(channel_id)
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+                log.error("Portail %s inaccessible : %r", channel_id, exc)
+                return "Salon inaccessible : vérifie son ID et les permissions du bot."
         if not isinstance(channel, discord.TextChannel):
-            log.warning("Salon portail inaccessible : %s", channel_id)
-            return
-        existing = DB.db.execute("SELECT message_id FROM portal_messages WHERE channel_id=?", (channel_id,)).fetchone()
+            log.error("Portail %s n'est pas un salon textuel.", channel_id)
+            return "Le salon configuré n'est pas un salon textuel."
+        existing = DB.db.execute(
+            "SELECT message_id FROM portal_messages WHERE channel_id=?", (channel_id,)
+        ).fetchone()
         if existing:
             try:
-                await channel.fetch_message(existing['message_id'])
-                return
+                await channel.fetch_message(existing["message_id"])
+                log.info("Portail existant dans %s : %s", channel_id, existing["message_id"])
+                return "Portail déjà présent."
             except discord.NotFound:
-                pass
+                log.warning("Portail supprimé dans %s, republication.", channel_id)
             except discord.Forbidden:
-                log.warning("Lecture du portail interdite dans %s", channel_id)
-                return
+                log.error("Permission Lire l'historique manquante dans %s", channel_id)
+                return "Permission Lire l'historique des messages manquante."
+            except discord.HTTPException as exc:
+                log.error("Impossible de vérifier le portail %s : %r", channel_id, exc)
+                return "Erreur Discord lors de la vérification du portail."
         try:
-            msg = await channel.send("# 🛡️ VIGILE IA — PORTAIL D'ACCUEIL\nBienvenue ! Pour obtenir le rôle **Membres**, clique ci-dessous.\n\nTon inscription se déroulera dans **un salon privé** : règlement → capture du profil → confirmation du pseudo → accès au serveur.\nEn cas d'anomalie, un modérateur sera prévenu.", view=Portal())
+            msg = await channel.send(
+                "# 🛡️ VIGILE IA — PORTAIL D'ACCUEIL\\n"
+                "Bienvenue ! Pour obtenir le rôle **Membres**, clique ci-dessous.\\n\\n"
+                "Ton inscription se déroulera dans **un salon privé** : règlement → "
+                "capture du profil → confirmation du pseudo → accès au serveur.\\n"
+                "En cas d'anomalie, un modérateur sera prévenu.",
+                view=Portal(),
+            )
             with DB.db:
-                DB.db.execute("INSERT OR REPLACE INTO portal_messages(channel_id,message_id) VALUES (?,?)", (channel_id,msg.id))
-        except discord.HTTPException:
-            log.exception("Publication du portail impossible dans %s", channel_id)
+                DB.db.execute(
+                    "INSERT OR REPLACE INTO portal_messages(channel_id,message_id) VALUES (?,?)",
+                    (channel_id, msg.id),
+                )
+            log.info("Portail publié dans %s : %s", channel_id, msg.id)
+            return "Portail publié."
+        except discord.Forbidden:
+            log.error("Permission Envoyer des messages manquante dans %s", channel_id)
+            return "Permission Envoyer des messages manquante."
+        except discord.HTTPException as exc:
+            log.exception("Publication du portail impossible dans %s : %r", channel_id, exc)
+            return "Erreur Discord pendant la publication."
 
+
+@tasks.loop(seconds=60)
+async def portal_healthcheck():
+    await publish_portals()
+
+
+@portal_healthcheck.before_loop
+async def before_portal_healthcheck():
+    await bot.wait_until_ready()
+
+
+@bot.tree.command(name="vigile-portail", description="Vérifier ou republier le portail de ce salon")
+async def vigile_portail(interaction: discord.Interaction):
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("Commande réservée au serveur.", ephemeral=True)
+        return
+    if not staff(interaction.user):
+        await interaction.response.send_message("Réservé aux modérateurs.", ephemeral=True)
+        return
+    if interaction.channel_id not in VIGILE_CHANNELS:
+        await interaction.response.send_message("Commande utilisable uniquement dans un salon Vigile.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    result = await ensure_portal(interaction.channel_id)
+    await interaction.followup.send(result, ephemeral=True)
 
 
 async def repair_deleted_portal(channel_id: int, message_ids):
