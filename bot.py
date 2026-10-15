@@ -292,10 +292,10 @@ async def ensure_portal(channel_id: int) -> str:
                 return "Erreur Discord lors de la vérification du portail."
         try:
             msg = await channel.send(
-                "# 🛡️ VIGILE IA — PORTAIL D'ACCUEIL\\n"
-                "Bienvenue ! Pour obtenir le rôle **Membres**, clique ci-dessous.\\n\\n"
+                "# 🛡️ VIGILE IA — PORTAIL D'ACCUEIL\n"
+                "Bienvenue ! Pour obtenir le rôle **Membres**, clique ci-dessous.\n\n"
                 "Ton inscription se déroulera dans **un salon privé** : règlement → "
-                "capture du profil → confirmation du pseudo → accès au serveur.\\n"
+                "capture du profil → confirmation du pseudo → accès au serveur.\n"
                 "En cas d'anomalie, un modérateur sera prévenu.",
                 view=Portal(),
             )
@@ -336,7 +336,11 @@ async def vigile_portail(interaction: discord.Interaction):
         await interaction.response.send_message("Commande utilisable uniquement dans un salon Vigile.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
-    result = await ensure_portal(interaction.channel_id)
+    try:
+        result = await ensure_portal(interaction.channel_id)
+    except Exception:
+        log.exception("Erreur commande vigile-portail, salon %s", interaction.channel_id)
+        result = "Erreur interne : consulte les logs Coolify."
     await interaction.followup.send(result, ephemeral=True)
 
 
@@ -382,7 +386,7 @@ async def on_raw_bulk_message_delete(payload: discord.RawBulkMessageDeleteEvent)
 
 
 def staff(member: discord.Member) -> bool:
-    return member.guild_permissions.manage_guild or (STAFF_ROLE != 0 and any(r.id == STAFF_ROLE for r in member.roles))
+    return (member.guild_permissions.manage_guild or member.guild_permissions.manage_channels) or (STAFF_ROLE != 0 and any(r.id == STAFF_ROLE for r in member.roles))
 
 
 def role_for(guild: discord.Guild):
@@ -545,6 +549,15 @@ async def on_ready():
     log.info("Connecté en tant que %s (%s)", bot.user, bot.user.id)
     log.info("Salons Vigile surveillés : %s", sorted(VIGILE_CHANNELS))
     await publish_portals()
+    if not portal_healthcheck.is_running():
+        portal_healthcheck.start()
+    for guild in bot.guilds:
+        try:
+            bot.tree.copy_global_to(guild=guild)
+            synced = await bot.tree.sync(guild=guild)
+            log.info("Commandes synchronisées sur %s : %s", guild.id, [c.name for c in synced])
+        except discord.HTTPException:
+            log.exception("Synchronisation des commandes impossible pour %s", guild.id)
     for guild in bot.guilds:
         log.info("Serveur %s (%s), rôle %s", guild.name, guild.id, bool(guild.get_role(ROLE)))
 

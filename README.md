@@ -63,5 +63,9 @@ pas réinitialisés par sécurité. La commande slash peut être visible ailleur
 mais son exécution y est interdite. Les décisions passées restent dans l'audit.
 
 
-## V2.6 — Restauration du portail
-Vérification au démarrage et toutes les 60 secondes. Restauration immédiate après suppression détectée (délai API non garanti). Commande staff `/vigile-portail` dans les salons Vigile. Logs détaillés des permissions et erreurs Discord. Permissions nécessaires : Voir le salon, Lire l’historique, Envoyer des messages.
+## V2.7 — Correction commande /vigile-portail
+- Synchronisation des commandes sur chaque serveur au démarrage.
+- Démarrage du contrôle périodique des portails.
+- Autorisation : Gérer le serveur, Gérer les salons ou rôle STAFF_ROLE_ID.
+- Logs Coolify détaillés en cas d’erreur.
+- Vérifier le scope Discord applications.commands si la commande est absente.
