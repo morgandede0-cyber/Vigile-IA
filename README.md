@@ -69,3 +69,6 @@ mais son exécution y est interdite. Les décisions passées restent dans l'audi
 - Autorisation : Gérer le serveur, Gérer les salons ou rôle STAFF_ROLE_ID.
 - Logs Coolify détaillés en cas d’erreur.
 - Vérifier le scope Discord applications.commands si la commande est absente.
+
+
+V2.8 : `/vigile-portail` est autorisé dans le salon principal et le salon test (ID 1560371205939396759). Le salon test est toujours ajouté aux salons surveillés même si la variable VIGILE_CHANNEL_IDS ne le mentionne pas. `/vigile-reset` reste réservé au salon test.

@@ -27,6 +27,8 @@ VIGILE_CHANNELS = {int(x.strip()) for x in os.getenv("VIGILE_CHANNEL_IDS", "1522
 MOD = int(os.getenv("MOD_CHANNEL_ID", "1531616175627173928"))
 MOD_TEST = int(os.getenv("MOD_TEST_CHANNEL_ID", "1560382339228377209"))
 VIGILE_TEST = int(os.getenv("VIGILE_TEST_CHANNEL_ID", "1560371205939396759"))
+# Le salon de test doit toujours être surveillé, même si VIGILE_CHANNEL_IDS ne le contient pas.
+VIGILE_CHANNELS.add(VIGILE_TEST)
 ROLE = int(os.getenv("MEMBER_ROLE_ID", "1522696283595472916"))
 STAFF_ROLE = int(os.getenv("STAFF_ROLE_ID") or 0)
 MAX_BYTES = int(os.getenv("MAX_IMAGE_BYTES", "8000000"))
@@ -333,7 +335,7 @@ async def vigile_portail(interaction: discord.Interaction):
         await interaction.response.send_message("Réservé aux modérateurs.", ephemeral=True)
         return
     if interaction.channel_id not in VIGILE_CHANNELS:
-        await interaction.response.send_message("Commande utilisable uniquement dans un salon Vigile.", ephemeral=True)
+        await interaction.response.send_message("Commande utilisable dans Vigile et Vigile Test uniquement.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
     try:
@@ -668,7 +670,7 @@ async def process_capture(message: discord.Message, confirmed_name=None):
 
 
 @bot.tree.command(name="vigile-reset", description="Réinitialiser uniquement les vérifications du portail de test")
-@app_commands.default_permissions(manage_guild=True)
+@app_commands.default_permissions(manage_guild=True, manage_channels=True)
 async def vigile_reset(interaction: discord.Interaction):
     # Les commandes slash ne sont pas masquables dynamiquement par salon ; refus strict ailleurs.
     if not interaction.guild or interaction.channel_id != VIGILE_TEST:
