@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Vigile IA Discord — V1.0
 
 Bot autonome de contrôle des arrivées : lecture OCR des captures de profil, surnom Discord, rôle Membres, alertes et boutons de décision pour le staff.
@@ -55,6 +54,19 @@ python -m compileall -q .
 
 Les captures sont acceptées dans les deux salons configurés par `VIGILE_CHANNEL_IDS` (IDs séparés par des virgules). Le salon Test exécute les mêmes actions réelles que le salon principal, y compris l’attribution du rôle et le changement de surnom. Les alertes restent centralisées dans le salon Modo.
 
-=======
-# Vigile-IA
->>>>>>> origin/main
+
+## V2 — Portail public et parcours privé
+
+- Le bot publie **un portail persistant** dans les deux salons `VIGILE_CHANNEL_IDS` au démarrage (pas de doublons si la base SQLite est conservée).
+- Le bouton **Commencer ma vérification** crée un salon texte privé, visible par le joueur, le bot et les administrateurs Discord (et toute personne disposant de permissions serveur qui contournent les restrictions de salons).
+- Le joueur accepte le règlement, envoie une capture, puis confirme le pseudo détecté. Une anomalie bloque la validation automatique et ouvre un dossier dans le salon Modo.
+- Le salon privé reste disponible après validation pour conserver une trace; il peut être supprimé manuellement par le staff.
+- Les anciennes captures déposées directement dans les salons publics ne déclenchent plus la validation.
+
+### Permissions supplémentaires
+
+Donner au bot **Gérer les salons** en plus de **Gérer les pseudos**, **Gérer les rôles**, **Voir les salons**, **Envoyer des messages**, **Lire l'historique**, **Joindre des fichiers** et **Intégrer des liens**. Activer les intents **Server Members** et **Message Content** dans le portail développeur Discord. Placer le rôle du bot au-dessus du rôle Membres et des membres qu'il doit renommer.
+
+### Important
+
+Les salons privés sont créés dans la catégorie du salon portail, mais avec des permissions spécifiques. Les administrateurs et personnes dotées de permissions de contournement peuvent y accéder. Les captures ne prouvent pas la propriété du compte de jeu. Les permissions et le parcours Discord doivent être testés après déploiement.
