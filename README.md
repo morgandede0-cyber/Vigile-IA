@@ -72,3 +72,10 @@ mais son exécution y est interdite. Les décisions passées restent dans l'audi
 
 
 V2.8 : `/vigile-portail` est autorisé dans le salon principal et le salon test (ID 1560371205939396759). Le salon test est toujours ajouté aux salons surveillés même si la variable VIGILE_CHANNEL_IDS ne le mentionne pas. `/vigile-reset` reste réservé au salon test.
+
+
+## V2.9 — Rôle Membres Test
+- Salon Vigile Test (`1560371205939396759`) : rôle `1552119593038909501`.
+- Salon Vigile principal : rôle `1522696283595472916`.
+- Variable Coolify facultative `MEMBER_TEST_ROLE_ID=1552119593038909501`.
+- Le bot doit avoir le droit Gérer les rôles et un rôle supérieur aux deux rôles cibles.

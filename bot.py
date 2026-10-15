@@ -30,6 +30,7 @@ VIGILE_TEST = int(os.getenv("VIGILE_TEST_CHANNEL_ID", "1560371205939396759"))
 # Le salon de test doit toujours être surveillé, même si VIGILE_CHANNEL_IDS ne le contient pas.
 VIGILE_CHANNELS.add(VIGILE_TEST)
 ROLE = int(os.getenv("MEMBER_ROLE_ID", "1522696283595472916"))
+ROLE_TEST = int(os.getenv("MEMBER_TEST_ROLE_ID", "1552119593038909501"))
 STAFF_ROLE = int(os.getenv("STAFF_ROLE_ID") or 0)
 MAX_BYTES = int(os.getenv("MAX_IMAGE_BYTES", "8000000"))
 MIN_CONFIDENCE = float(os.getenv("OCR_MIN_CONFIDENCE", "70"))
@@ -391,8 +392,8 @@ def staff(member: discord.Member) -> bool:
     return (member.guild_permissions.manage_guild or member.guild_permissions.manage_channels) or (STAFF_ROLE != 0 and any(r.id == STAFF_ROLE for r in member.roles))
 
 
-def role_for(guild: discord.Guild):
-    return guild.get_role(ROLE)
+def role_for(guild: discord.Guild, origin_channel_id: int):
+    return guild.get_role(ROLE_TEST if origin_channel_id == VIGILE_TEST else ROLE)
 
 
 def duplicate_reason(guild: discord.Guild, user_id: int, name: str, digest: str):
@@ -406,9 +407,9 @@ def duplicate_reason(guild: discord.Guild, user_id: int, name: str, digest: str)
     return None
 
 
-async def apply_member(member: discord.Member, name: str):
+async def apply_member(member: discord.Member, name: str, origin_channel_id: int):
     """Ne pas attribuer le rôle si le changement de surnom échoue."""
-    role = role_for(member.guild)
+    role = role_for(member.guild, origin_channel_id)
     if role is None:
         raise RuntimeError("Rôle Membres introuvable")
     me = member.guild.me
@@ -477,7 +478,7 @@ class Review(discord.ui.View):
                     await interaction.followup.send(f"Validation bloquée : {problem}.", ephemeral=True)
                     return
                 try:
-                    await apply_member(member, name)
+                    await apply_member(member, name, (session_for(guild.id, member.id) or {}).get("origin_channel_id", 0))
                 except (discord.Forbidden, discord.HTTPException, RuntimeError) as exc:
                     log.warning("Validation échouée pour %s : %s", member.id, exc)
                     await interaction.followup.send(f"Échec Discord : {exc}. Vérifie les permissions et réessaie.", ephemeral=True)
@@ -561,7 +562,7 @@ async def on_ready():
         except discord.HTTPException:
             log.exception("Synchronisation des commandes impossible pour %s", guild.id)
     for guild in bot.guilds:
-        log.info("Serveur %s (%s), rôle %s", guild.name, guild.id, bool(guild.get_role(ROLE)))
+        log.info("Serveur %s (%s), rôle principal=%s, rôle test=%s", guild.name, guild.id, bool(guild.get_role(ROLE)), bool(guild.get_role(ROLE_TEST)))
 
 
 @bot.event
@@ -649,7 +650,7 @@ async def process_capture(message: discord.Message, confirmed_name=None):
             reason = 'Pseudo différent de celui confirmé'
     if reason is None and result:
         try:
-            await apply_member(user, result.name)
+            await apply_member(user, result.name, record["origin_channel_id"])
         except (discord.Forbidden, discord.HTTPException, RuntimeError) as exc:
             reason = f'Erreur de configuration Discord : {exc}'
         else:
