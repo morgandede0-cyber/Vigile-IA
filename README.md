@@ -99,3 +99,22 @@ V2.8 : `/vigile-portail` est autorisé dans le salon principal et le salon test 
 - La validation échouée conserve le dossier en attente pour permettre une nouvelle tentative.
 - Permissions nécessaires : Gérer les pseudos, Gérer les rôles, Gérer les messages ; le rôle du bot doit être au-dessus du joueur et du rôle attribué. Pour les modérateurs, Gérer le serveur ou Gérer les salons ou STAFF_ROLE_ID.
 - Tester les deux parcours (automatique et validation staff) sur Discord ; les tests unitaires ne simulent pas les permissions Discord ni une capture réelle de jeu.
+
+
+## V3.2 — Accès direct au salon privé
+Après le clic sur Commencer ma vérification, le bot fournit immédiatement un bouton-lien vers le salon privé créé. Si une session existe, le même bouton est affiché. Discord ne permet pas aux bots de forcer le client d’un utilisateur à changer de salon : un clic reste nécessaire.
+
+
+## V3.3 — Accueil bilingue
+Le portail affiche le nouveau texte de bienvenue IV en français. Deux boutons 🇫🇷 Français et 🇬🇧 English ouvrent une version traduite visible uniquement par le joueur, avec un bouton de démarrage. Le bouton de démarrage public reste disponible. Les portails existants sont édités sur place au redémarrage (pas de nouveau message). Les étapes de vérification privées restent en français dans cette version.
+
+
+## V3.4 — Règlement condensé FR/EN
+- Règlement complet remplacé par la version courte validée.
+- Traduction anglaise selon le choix du portail.
+- Langue persistée dans SQLite (migration non destructive).
+- Bouton d’acceptation traduit ; les autres étapes restent en français.
+
+
+## V3.5 — Un seul sélecteur de langue
+Le portail public affiche un bouton 🌐 EN sur la première rangée et un bouton Commencer sur la seconde. Le bouton langue ouvre un affichage privé où un seul bouton bascule FR/EN, avec démarrage dans la langue choisie. La langue est enregistrée en base dans sessions.language et utilisée pour le règlement et les instructions de capture. Discord ne permet pas de placer les boutons au coin supérieur droit du texte ; la première rangée est le placement le plus proche possible sans Activity. Les outils de modération et certains messages techniques restent en français.

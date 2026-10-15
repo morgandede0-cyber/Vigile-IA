@@ -61,6 +61,10 @@ if 'origin_channel_id' not in {r['name'] for r in DB.db.execute('PRAGMA table_in
     with DB.db:
         DB.db.execute('ALTER TABLE sessions ADD COLUMN origin_channel_id INTEGER NOT NULL DEFAULT 0')
 
+if 'language' not in {r['name'] for r in DB.db.execute('PRAGMA table_info(sessions)')}:
+    with DB.db:
+        DB.db.execute("ALTER TABLE sessions ADD COLUMN language TEXT NOT NULL DEFAULT 'fr'")
+
 # Migration des tentatives : persistance entre redémarrages.
 for column, definition in {
     'attempts': 'INTEGER NOT NULL DEFAULT 0',
@@ -140,56 +144,135 @@ async def close_session(guild_id: int, user_id: int, delay: int = 10):
         DB.db.execute("DELETE FROM sessions WHERE guild_id=? AND user_id=? AND channel_id=?", (guild_id, user_id, channel_id))
 
 
+PORTAL_TEXT_FR = ("# 🛡️ Bienvenue sur ⌁ IV ⌁ | Million Lords\n\n"
+    "**IV est bien plus qu’un clan : c’est une communauté** unie par la passion du jeu, l’entraide et l’aventure.\n\n"
+    "Pour rejoindre nos rangs, **Vigile IA** vous accompagnera dans une courte vérification de votre identité en jeu.\n\n"
+    "🔒 Votre vérification est privée, simple et sécurisée.\n\n"
+    "**Toute l’équipe IV vous souhaite la bienvenue !**\n\n"
+    "🛡️ **Commencez votre aventure dès maintenant.**")
+PORTAL_TEXT_EN = ("# 🛡️ Welcome to ⌁ IV ⌁ | Million Lords\n\n"
+    "**IV is more than a clan: it's a community** united by a passion for gaming, teamwork and adventure.\n\n"
+    "To join our ranks, **Vigile IA** will guide you through a quick verification of your in-game identity.\n\n"
+    "🔒 Your verification is private, simple and secure.\n\n"
+    "**The entire IV team welcomes you!**\n\n"
+    "🛡️ **Start your adventure now.**")
+
+
+RULES_FR = ("# 📜 Règlement — ⌁ IV ⌁\n\n"
+    "🤝 **Respect & convivialité**\nRespectez chaque membre. Harcèlement, discrimination, insultes et provocations sont interdits.\n\n"
+    "💬 **Communication**\nRestez courtois, évitez les conflits publics et utilisez les salons appropriés.\n\n"
+    "🚫 **Contenus interdits**\nSpam, publicités non autorisées, contenus NSFW ou choquants, liens malveillants, arnaques et usurpation d'identité.\n\n"
+    "🛡️ **Staff & modération**\nRespectez les décisions du staff. En cas de problème, contactez **#・contact-staff**.\n\n"
+    "⚖️ **Sanctions**\nTout manquement peut entraîner un avertissement, une exclusion temporaire, une suspension ou un bannissement définitif, selon la gravité.\n\n"
+    "---\n✅ **En poursuivant votre vérification, vous acceptez ce règlement et vous engagez à le respecter.**")
+RULES_EN = ("# 📜 Rules — ⌁ IV ⌁\n\n"
+    "🤝 **Respect & community**\nRespect everyone. Harassment, discrimination, insults and provocation are forbidden.\n\n"
+    "💬 **Communication**\nBe polite, avoid public arguments and use the appropriate channels.\n\n"
+    "🚫 **Prohibited content**\nNo spam, unauthorized advertising, NSFW or shocking content, malicious links, scams or impersonation.\n\n"
+    "🛡️ **Staff & moderation**\nRespect staff decisions. For concerns, contact **#・contact-staff**.\n\n"
+    "⚖️ **Penalties**\nViolations may result in a warning, temporary removal, suspension or permanent ban depending on severity.\n\n"
+    "---\n✅ **By continuing verification, you agree to follow these rules.**")
+
+
+async def start_verification(interaction: discord.Interaction, language: str = "fr"):
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        return await interaction.response.send_message("Action disponible uniquement sur le serveur.", ephemeral=True)
+    if interaction.channel_id not in VIGILE_CHANNELS:
+        return await interaction.response.send_message("Utilise le portail dans le salon Vigile.", ephemeral=True)
+    if DB.approved_user(interaction.guild.id, interaction.user.id):
+        return await interaction.response.send_message("Tu es déjà membre validé.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    guild, member = interaction.guild, interaction.user
+    existing = session_for(guild.id, member.id)
+    if existing:
+        channel = guild.get_channel(existing['channel_id'])
+        if channel:
+            jump = discord.ui.View(timeout=120)
+            jump.add_item(discord.ui.Button(label="Open verification" if existing["language"] == "en" else "Ouvrir ma vérification", style=discord.ButtonStyle.link, url=channel.jump_url, emoji="➡️"))
+            return await interaction.followup.send(
+                "Your verification is already open. Use the button to join your private channel:"
+                if existing["language"] == "en" else
+                "Ta vérification est déjà ouverte. Clique pour rejoindre ton salon privé :",
+                view=jump, ephemeral=True
+            )
+        with DB.db:
+            DB.db.execute("DELETE FROM sessions WHERE guild_id=? AND user_id=?", (guild.id, member.id))
+    me = guild.me
+    if not me or not me.guild_permissions.manage_channels:
+        return await interaction.followup.send("Impossible de créer ton espace privé. Préviens le staff (permission Gérer les salons manquante).", ephemeral=True)
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        member: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True),
+        me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_channels=True)
+    }
+    try:
+        channel = await guild.create_text_channel(
+            name=private_channel_name(member),
+            category=interaction.channel.category if isinstance(interaction.channel, discord.TextChannel) else None,
+            overwrites=overwrites,
+            topic=f"Vigile IA - vérification privée du membre {member.id}",
+            reason="Vigile IA : création du parcours privé"
+        )
+    except discord.HTTPException as exc:
+        log.exception("Création du salon privé impossible")
+        return await interaction.followup.send(f"Impossible d'ouvrir la vérification : {exc}", ephemeral=True)
+    with DB.db:
+        DB.db.execute("INSERT INTO sessions(guild_id,user_id,channel_id,step,origin_channel_id,language) VALUES (?,?,?,?,?,?)", (guild.id, member.id, channel.id, 'rules', interaction.channel_id, language))
+    await channel.send(f"{member.mention}\n" + (RULES_EN if language == "en" else RULES_FR), view=Rules(member.id, language))
+    jump = discord.ui.View(timeout=120)
+    jump.add_item(discord.ui.Button(label="➡️ Open verification" if language == "en" else "➡️ Accéder à ma vérification", style=discord.ButtonStyle.link, url=channel.jump_url))
+    await interaction.followup.send(
+        "**Your private channel is ready!** Use the button below to open it."
+        if language == "en" else
+        "**Ton salon privé est prêt !** Clique sur le bouton ci-dessous pour y accéder immédiatement.",
+        view=jump, ephemeral=True
+    )
+
+
+class LanguageChoice(discord.ui.View):
+    """Choix privé : un seul bouton bascule FR/EN, conservé au démarrage."""
+    def __init__(self, lang: str = "fr"):
+        super().__init__(timeout=180)
+        self.lang = "en" if lang == "en" else "fr"
+        self.children[0].label = "🇬🇧 English" if self.lang == "fr" else "🇫🇷 Français"
+        self.children[1].label = "Start verification" if self.lang == "en" else "Commencer ma vérification"
+
+    @discord.ui.button(label="🇬🇧 English", style=discord.ButtonStyle.secondary, row=0)
+    async def toggle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.lang = "en" if self.lang == "fr" else "fr"
+        self.children[0].label = "🇬🇧 English" if self.lang == "fr" else "🇫🇷 Français"
+        self.children[1].label = "Start verification" if self.lang == "en" else "Commencer ma vérification"
+        await interaction.response.edit_message(
+            content=PORTAL_TEXT_EN if self.lang == "en" else PORTAL_TEXT_FR, view=self
+        )
+
+    @discord.ui.button(label="Commencer ma vérification", style=discord.ButtonStyle.success, emoji="🛡️", row=1)
+    async def begin(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await start_verification(interaction, self.lang)
+
+
 class Portal(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Commencer ma vérification", style=discord.ButtonStyle.success, emoji="🛡️", custom_id="vigile:portal:start")
+    @discord.ui.button(label="🌐 EN", style=discord.ButtonStyle.secondary, custom_id="vigile:portal:language", row=0)
+    async def language(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Discord ne permet pas de placer un bouton au-dessus d'un texte :
+        # première rangée du portail, choix privé sans modifier la langue des autres.
+        await interaction.response.send_message(
+            PORTAL_TEXT_FR, view=LanguageChoice("fr"), ephemeral=True
+        )
+
+    @discord.ui.button(label="Commencer ma vérification", style=discord.ButtonStyle.success, emoji="🛡️", custom_id="vigile:portal:start", row=1)
     async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.guild or not isinstance(interaction.user, discord.Member):
-            return await interaction.response.send_message("Action disponible uniquement sur le serveur.", ephemeral=True)
-        if interaction.channel_id not in VIGILE_CHANNELS:
-            return await interaction.response.send_message("Utilise le portail dans le salon Vigile.", ephemeral=True)
-        if DB.approved_user(interaction.guild.id, interaction.user.id):
-            return await interaction.response.send_message("Tu es déjà membre validé.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        guild, member = interaction.guild, interaction.user
-        existing = session_for(guild.id, member.id)
-        if existing:
-            channel = guild.get_channel(existing['channel_id'])
-            if channel:
-                return await interaction.followup.send(f"Ta vérification est déjà ouverte : {channel.mention}", ephemeral=True)
-            with DB.db:
-                DB.db.execute("DELETE FROM sessions WHERE guild_id=? AND user_id=?", (guild.id, member.id))
-        me = guild.me
-        if not me or not me.guild_permissions.manage_channels:
-            return await interaction.followup.send("Impossible de créer ton espace privé. Préviens le staff (permission Gérer les salons manquante).", ephemeral=True)
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            member: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True),
-            me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_channels=True)
-        }
-        try:
-            channel = await guild.create_text_channel(
-                name=private_channel_name(member),
-                category=interaction.channel.category if isinstance(interaction.channel, discord.TextChannel) else None,
-                overwrites=overwrites,
-                topic=f"Vigile IA - vérification privée du membre {member.id}",
-                reason="Vigile IA : création du parcours privé"
-            )
-        except discord.HTTPException as exc:
-            log.exception("Création du salon privé impossible")
-            return await interaction.followup.send(f"Impossible d'ouvrir la vérification : {exc}", ephemeral=True)
-        with DB.db:
-            DB.db.execute("INSERT INTO sessions(guild_id,user_id,channel_id,step,origin_channel_id) VALUES (?,?,?,?,?)", (guild.id, member.id, channel.id, 'rules', interaction.channel_id))
-        await channel.send(f"Bienvenue {member.mention} ! **Étape 1/3 : règlement**\nRespecte les règles du serveur et les autres membres. N'envoie pas de captures appartenant à autrui. Clique sur le bouton pour accepter et continuer.", view=Rules(member.id))
-        await interaction.followup.send(f"Ton espace privé est prêt : {channel.mention}", ephemeral=True)
+        await start_verification(interaction, "fr")
 
 
 class Rules(discord.ui.View):
-    def __init__(self, user_id):
+    def __init__(self, user_id, language="fr"):
         super().__init__(timeout=None)
         self.user_id = user_id
+        self.children[0].label = "I agree and continue" if language == "en" else "J’accepte et je continue"
         self.children[0].custom_id = f"vigile:rules:{user_id}"
 
     @discord.ui.button(label="J'accepte et je continue", style=discord.ButtonStyle.primary, custom_id="vigile:rules:placeholder")
@@ -282,7 +365,12 @@ async def ensure_portal(channel_id: int) -> str:
         ).fetchone()
         if existing:
             try:
-                await channel.fetch_message(existing["message_id"])
+                old_portal = await channel.fetch_message(existing["message_id"])
+                if old_portal.author.id == bot.user.id:
+                    if old_portal.content != PORTAL_TEXT_FR or len(old_portal.components) < 2:
+                        await old_portal.edit(content=PORTAL_TEXT_FR, view=Portal())
+                        log.info("Portail mis à jour dans %s", channel_id)
+                        return "Portail mis à jour."
                 log.info("Portail existant dans %s : %s", channel_id, existing["message_id"])
                 return "Portail déjà présent."
             except discord.NotFound:
@@ -294,14 +382,7 @@ async def ensure_portal(channel_id: int) -> str:
                 log.error("Impossible de vérifier le portail %s : %r", channel_id, exc)
                 return "Erreur Discord lors de la vérification du portail."
         try:
-            msg = await channel.send(
-                "# 🛡️ VIGILE IA — PORTAIL D'ACCUEIL\n"
-                "Bienvenue ! Pour obtenir le rôle **Membres**, clique ci-dessous.\n\n"
-                "Ton inscription se déroulera dans **un salon privé** : règlement → "
-                "capture du profil → confirmation du pseudo → accès au serveur.\n"
-                "En cas d'anomalie, un modérateur sera prévenu.",
-                view=Portal(),
-            )
+            msg = await channel.send(PORTAL_TEXT_FR, view=Portal())
             with DB.db:
                 DB.db.execute(
                     "INSERT OR REPLACE INTO portal_messages(channel_id,message_id) VALUES (?,?)",
@@ -589,10 +670,10 @@ async def on_message(message: discord.Message):
     attachments = [a for a in message.attachments if
                    (a.content_type or '').lower().split(';')[0] in ('image/png', 'image/jpeg', 'image/webp')]
     if not attachments:
-        await message.reply('📸 Envoie une capture PNG, JPG ou WebP de ton profil.', mention_author=False)
+        await message.reply('📸 Please send a PNG, JPG or WebP screenshot of your profile.' if record['language'] == 'en' else '📸 Envoie une capture PNG, JPG ou WebP de ton profil.', mention_author=False)
         return
     if attachments[0].size > MAX_BYTES:
-        await message.reply('⚠️ Image trop volumineuse (8 Mo maximum).', mention_author=False)
+        await message.reply('⚠️ Image too large (8 MB maximum).' if record['language'] == 'en' else '⚠️ Image trop volumineuse (8 Mo maximum).', mention_author=False)
         return
     # Verrou par joueur : deux images envoyées simultanément ne créent pas deux dossiers.
     lock = locks.setdefault(('upload', message.guild.id, message.author.id), asyncio.Lock())
@@ -639,10 +720,10 @@ async def escalate_capture(message, data, result, reason):
     try:
         await mod_alert(case_id, user, result.name if result else None,
                         result.confidence if result else 0, reason, data)
-        await message.reply('🛡️ Deux essais infructueux. Ton dossier a été transmis aux modérateurs. Attends leur décision.', mention_author=False)
+        await message.reply('🛡️ Both attempts failed. Your case has been sent to the moderators. Please wait for their decision.' if record['language'] == 'en' else '🛡️ Deux essais infructueux. Ton dossier a été transmis aux modérateurs. Attends leur décision.', mention_author=False)
     except (discord.HTTPException, discord.Forbidden):
         log.exception('Alerte modo impossible pour dossier %s', case_id)
-        await message.reply('⚠️ Impossible de contacter le staff automatiquement. Contacte un administrateur.', mention_author=False)
+        await message.reply('⚠️ Could not contact moderators automatically. Please contact an administrator.' if record['language'] == 'en' else '⚠️ Impossible de contacter le staff automatiquement. Contacte un administrateur.', mention_author=False)
 
 
 async def process_capture(message: discord.Message, confirmed_name=None):
@@ -719,9 +800,9 @@ async def setup_hook():
     bot.add_view(Portal())
     for case in DB.db.execute("SELECT id FROM cases WHERE status='pending'").fetchall():
         bot.add_view(Review(case["id"]))
-    for session in DB.db.execute("SELECT user_id,channel_id,step FROM sessions").fetchall():
+    for session in DB.db.execute("SELECT user_id,channel_id,step,language FROM sessions").fetchall():
         if session['step'] == 'rules':
-            bot.add_view(Rules(session['user_id']))
+            bot.add_view(Rules(session['user_id'], session['language']))
     # Les confirmations actives sont restaurées depuis les messages persistés.
     for session in DB.db.execute("SELECT channel_id,user_id FROM sessions WHERE step='confirm'").fetchall():
         channel = bot.get_channel(session['channel_id'])
