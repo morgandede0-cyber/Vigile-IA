@@ -6,6 +6,8 @@ import hashlib
 import io
 import logging
 import os
+import re
+import unicodedata
 import sqlite3
 
 import discord
@@ -22,6 +24,8 @@ log = logging.getLogger("vigile")
 TOKEN = os.getenv("DISCORD_TOKEN", "")
 VIGILE_CHANNELS = {int(x.strip()) for x in os.getenv("VIGILE_CHANNEL_IDS", "1522707744828821765,1560371205939396759").split(",") if x.strip()}
 MOD = int(os.getenv("MOD_CHANNEL_ID", "1531616175627173928"))
+MOD_TEST = int(os.getenv("MOD_TEST_CHANNEL_ID", "1560382339228377209"))
+VIGILE_TEST = int(os.getenv("VIGILE_TEST_CHANNEL_ID", "1560371205939396759"))
 ROLE = int(os.getenv("MEMBER_ROLE_ID", "1522696283595472916"))
 STAFF_ROLE = int(os.getenv("STAFF_ROLE_ID") or 0)
 MAX_BYTES = int(os.getenv("MAX_IMAGE_BYTES", "8000000"))
@@ -41,10 +45,24 @@ CREATE TABLE IF NOT EXISTS portal_messages (channel_id INTEGER PRIMARY KEY, mess
 CREATE TABLE IF NOT EXISTS sessions (
  guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
  channel_id INTEGER NOT NULL UNIQUE, step TEXT NOT NULL,
+ origin_channel_id INTEGER NOT NULL DEFAULT 0,
  PRIMARY KEY(guild_id, user_id)
 );
 """)
 DB.db.commit()
+# Migration non destructive pour les installations V2.1 existantes.
+if 'origin_channel_id' not in {r['name'] for r in DB.db.execute('PRAGMA table_info(sessions)')}:
+    with DB.db:
+        DB.db.execute('ALTER TABLE sessions ADD COLUMN origin_channel_id INTEGER NOT NULL DEFAULT 0')
+
+
+def alert_channel_for_origin(origin_channel_id: int) -> int:
+    return MOD_TEST if origin_channel_id == VIGILE_TEST else MOD
+
+
+def alert_channel_for_case(case) -> int:
+    session = session_for(case['guild_id'], case['user_id'])
+    return alert_channel_for_origin(session['origin_channel_id'] if session else 0)
 
 
 def session_for(guild_id, user_id):
@@ -58,6 +76,33 @@ def session_channel(channel_id):
 def set_step(guild_id, user_id, step):
     with DB.db:
         DB.db.execute("UPDATE sessions SET step=? WHERE guild_id=? AND user_id=?", (step, guild_id, user_id))
+
+
+def private_channel_name(member: discord.Member) -> str:
+    """Use the current server display name; Discord channel names must be safe."""
+    name = unicodedata.normalize("NFKD", member.display_name)
+    name = "".join(ch for ch in name if not unicodedata.combining(ch))
+    name = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:75]
+    return f"verification-{name or 'joueur'}"
+
+
+async def close_session(guild_id: int, user_id: int, delay: int = 10):
+    """Close the temporary channel after a decision; never delete other channels."""
+    record = session_for(guild_id, user_id)
+    if not record:
+        return
+    channel_id = record['channel_id']
+    await asyncio.sleep(delay)
+    guild = bot.get_guild(guild_id)
+    channel = guild.get_channel(channel_id) if guild else None
+    if channel is not None:
+        try:
+            await channel.delete(reason="Vigile IA : vérification terminée")
+        except (discord.Forbidden, discord.HTTPException):
+            log.exception("Impossible de fermer le salon privé %s", channel_id)
+            return
+    with DB.db:
+        DB.db.execute("DELETE FROM sessions WHERE guild_id=? AND user_id=? AND channel_id=?", (guild_id, user_id, channel_id))
 
 
 class Portal(discord.ui.View):
@@ -91,7 +136,7 @@ class Portal(discord.ui.View):
         }
         try:
             channel = await guild.create_text_channel(
-                name=f"verification-{member.id}",
+                name=private_channel_name(member),
                 category=interaction.channel.category if isinstance(interaction.channel, discord.TextChannel) else None,
                 overwrites=overwrites,
                 topic=f"Vigile IA - vérification privée du membre {member.id}",
@@ -101,7 +146,7 @@ class Portal(discord.ui.View):
             log.exception("Création du salon privé impossible")
             return await interaction.followup.send(f"Impossible d'ouvrir la vérification : {exc}", ephemeral=True)
         with DB.db:
-            DB.db.execute("INSERT INTO sessions(guild_id,user_id,channel_id,step) VALUES (?,?,?,?)", (guild.id, member.id, channel.id, 'rules'))
+            DB.db.execute("INSERT INTO sessions(guild_id,user_id,channel_id,step,origin_channel_id) VALUES (?,?,?,?,?)", (guild.id, member.id, channel.id, 'rules', interaction.channel_id))
         await channel.send(f"Bienvenue {member.mention} ! **Étape 1/3 : règlement**\nRespecte les règles du serveur et les autres membres. N'envoie pas de captures appartenant à autrui. Clique sur le bouton pour accepter et continuer.", view=Rules(member.id))
         await interaction.followup.send(f"Ton espace privé est prêt : {channel.mention}", ephemeral=True)
 
@@ -148,6 +193,7 @@ class Confirm(discord.ui.View):
         await process_capture(original, confirmed_name=self.name)
         if DB.approved_user(record['guild_id'], record['user_id']):
             set_step(record['guild_id'], record['user_id'], 'done')
+            asyncio.create_task(close_session(record['guild_id'], record['user_id']))
         elif DB.pending_for_user(record['guild_id'], record['user_id']):
             set_step(record['guild_id'], record['user_id'], 'pending')
         else:
@@ -231,7 +277,7 @@ class Review(discord.ui.View):
                 item.custom_id = f"vigile:{item.custom_id.split(':')[1]}:{case_id}"
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if not isinstance(interaction.user, discord.Member) or not staff(interaction.user) or interaction.channel_id != MOD:
+        if not isinstance(interaction.user, discord.Member) or not staff(interaction.user) or interaction.channel_id != alert_channel_for_case(DB.get(self.case_id) or {"guild_id": interaction.guild_id, "user_id": 0}):
             await interaction.response.send_message("Action réservée aux modérateurs autorisés.", ephemeral=True)
             return False
         return True
@@ -265,6 +311,8 @@ class Review(discord.ui.View):
                     await interaction.followup.send(f"Échec Discord : {exc}. Vérifie les permissions et réessaie.", ephemeral=True)
                     return
                 DB.approve(self.case_id, name, interaction.user.id)
+                set_step(guild.id, member.id, "done")
+                asyncio.create_task(close_session(guild.id, member.id))
                 outcome = f"Validé par {interaction.user.mention} : {discord.utils.escape_markdown(name)}"
                 try:
                     await member.send(f"✅ Profil validé : ton surnom est **{discord.utils.escape_markdown(name)}** et le rôle Membres a été attribué.")
@@ -272,6 +320,11 @@ class Review(discord.ui.View):
                     pass
             else:
                 DB.set_status(self.case_id, "rejected" if action == "reject" else "retry", interaction.user.id)
+                if member and action == "reject":
+                    set_step(guild.id, member.id, "rejected")
+                    asyncio.create_task(close_session(guild.id, member.id))
+                elif member and action == "retry":
+                    set_step(guild.id, member.id, "image")
                 outcome = ("Refusé" if action == "reject" else "Nouvelle capture demandée") + f" par {interaction.user.mention}"
                 if member:
                     try:
@@ -300,7 +353,9 @@ class Review(discord.ui.View):
 
 
 async def mod_alert(case_id: int, user: discord.Member, name: str | None, confidence: float, reason: str, image: bytes):
-    channel = bot.get_channel(MOD) or await bot.fetch_channel(MOD)
+    case = DB.get(case_id)
+    target = alert_channel_for_case(case)
+    channel = bot.get_channel(target) or await bot.fetch_channel(target)
     embed = discord.Embed(title="🛡️ Vigile — vérification nécessaire", color=discord.Color.orange())
     embed.add_field(name="Joueur Discord", value=f"{user.mention} (`{user.id}`)", inline=False)
     embed.add_field(name="Pseudo proposé", value=discord.utils.escape_markdown(name or "Non reconnu"), inline=True)
@@ -394,7 +449,9 @@ async def process_capture(message: discord.Message, confirmed_name=None):
             case_id = DB.create_case(message.guild.id, user.id, message.id, digest, attachment.url, result.name, result.confidence, "Validation automatique")
             if case_id is not None:
                 DB.approve(case_id, result.name)
-            await message.reply(f"✅ Bienvenue {discord.utils.escape_markdown(result.name)} ! Ton surnom et le rôle **Membres** ont été attribués.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+            await message.reply(f"✅ Bienvenue {discord.utils.escape_markdown(result.name)} ! Ton surnom et le rôle **Membres** ont été attribués. Ce salon privé sera supprimé dans 10 secondes.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+            set_step(message.guild.id, user.id, "done")
+            asyncio.create_task(close_session(message.guild.id, user.id))
             return
     case_id = DB.create_case(message.guild.id, user.id, message.id, digest, attachment.url, result.name, result.confidence, reason or "Vérification requise")
     if case_id is None:

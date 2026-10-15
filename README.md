@@ -70,3 +70,16 @@ Donner au bot **Gérer les salons** en plus de **Gérer les pseudos**, **Gérer 
 ### Important
 
 Les salons privés sont créés dans la catégorie du salon portail, mais avec des permissions spécifiques. Les administrateurs et personnes dotées de permissions de contournement peuvent y accéder. Les captures ne prouvent pas la propriété du compte de jeu. Les permissions et le parcours Discord doivent être testés après déploiement.
+
+## V2.1 — Nom du salon et fermeture automatique
+
+- Le salon privé utilise le pseudo Discord actuel du joueur (`verification-pseudo`) plutôt que son identifiant numérique. Les caractères incompatibles sont normalisés.
+- Après validation automatique ou validation par un modérateur, le salon temporaire est supprimé après 10 secondes et la session est nettoyée.
+- Après refus par le staff, le salon est également supprimé ; une demande de nouvelle capture conserve le salon ouvert.
+- Le salon public Vigile et le salon Modo ne sont jamais supprimés.
+- Si Discord refuse la suppression, l'erreur est journalisée et le salon reste ouvert pour intervention manuelle.
+
+
+## V2.2 — Alertes de test séparées
+
+Les vérifications démarrées depuis `VIGILE_TEST_CHANNEL_ID` envoient leurs alertes et boutons de modération vers `MOD_TEST_CHANNEL_ID`. Les autres vérifications utilisent `MOD_CHANNEL_ID`. L'origine du parcours est enregistrée dans SQLite dès la création du salon privé et conservée pendant la vérification. La migration de base de données est automatique. Les anciennes sessions créées avant cette version utilisent le salon Modo principal (origine inconnue).
