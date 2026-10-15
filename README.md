@@ -61,3 +61,9 @@ retire pas les rôles Discord et ne touche pas aux validations du portail réel.
 Les anciens dossiers antérieurs à V2.4 sans provenance enregistrée ne sont
 pas réinitialisés par sécurité. La commande slash peut être visible ailleurs,
 mais son exécution y est interdite. Les décisions passées restent dans l'audit.
+
+## V2.5 — Protection du portail
+
+Les portails publics Vigile (principal et test) sont restaurés automatiquement après suppression du message, y compris lors d'une suppression groupée. L'événement de suppression est reçu via les événements raw Discord, indépendamment du cache des messages. Une attente de 1 seconde précède la republication; le délai réel peut dépasser 5 secondes en cas de latence ou d'indisponibilité Discord.
+
+Le bot vérifie l'identifiant du portail enregistré dans SQLite, évite les republications concurrentes et restaure également un portail manquant au redémarrage. Nécessite les permissions Voir le salon, Lire l'historique et Envoyer des messages dans les deux salons Vigile.

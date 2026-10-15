@@ -39,6 +39,8 @@ intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!vigile_unused_", intents=intents, help_command=None)
 locks = {}
+portal_repair_tasks = {}
+portal_publish_locks = {}
 
 # Portail public, salons de vérification privés persistants.
 DB.db.executescript("""
@@ -256,20 +258,26 @@ class Confirm(discord.ui.View):
 
 async def publish_portals():
     for channel_id in VIGILE_CHANNELS:
+        await ensure_portal(channel_id)
+
+
+async def ensure_portal(channel_id):
+    lock = portal_publish_locks.setdefault(channel_id, asyncio.Lock())
+    async with lock:
         channel = bot.get_channel(channel_id)
         if not isinstance(channel, discord.TextChannel):
             log.warning("Salon portail inaccessible : %s", channel_id)
-            continue
+            return
         existing = DB.db.execute("SELECT message_id FROM portal_messages WHERE channel_id=?", (channel_id,)).fetchone()
         if existing:
             try:
                 await channel.fetch_message(existing['message_id'])
-                continue
+                return
             except discord.NotFound:
                 pass
             except discord.Forbidden:
                 log.warning("Lecture du portail interdite dans %s", channel_id)
-                continue
+                return
         try:
             msg = await channel.send("# 🛡️ VIGILE IA — PORTAIL D'ACCUEIL\nBienvenue ! Pour obtenir le rôle **Membres**, clique ci-dessous.\n\nTon inscription se déroulera dans **un salon privé** : règlement → capture du profil → confirmation du pseudo → accès au serveur.\nEn cas d'anomalie, un modérateur sera prévenu.", view=Portal())
             with DB.db:
@@ -277,6 +285,47 @@ async def publish_portals():
         except discord.HTTPException:
             log.exception("Publication du portail impossible dans %s", channel_id)
 
+
+
+async def repair_deleted_portal(channel_id: int, message_ids):
+    """Recreate only the currently registered portal, after a short delay."""
+    if channel_id not in VIGILE_CHANNELS:
+        return
+    row = DB.db.execute(
+        "SELECT message_id FROM portal_messages WHERE channel_id=?", (channel_id,)
+    ).fetchone()
+    if not row or row["message_id"] not in message_ids:
+        return
+    task = portal_repair_tasks.get(channel_id)
+    if task and not task.done():
+        return
+
+    async def restore():
+        try:
+            await asyncio.sleep(1)  # Attempt restoration promptly; Discord API latency may vary.
+            current = DB.db.execute(
+                "SELECT message_id FROM portal_messages WHERE channel_id=?", (channel_id,)
+            ).fetchone()
+            if current and current["message_id"] in message_ids:
+                await ensure_portal(channel_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Échec de restauration du portail dans %s", channel_id)
+        finally:
+            portal_repair_tasks.pop(channel_id, None)
+
+    portal_repair_tasks[channel_id] = asyncio.create_task(restore())
+
+
+@bot.event
+async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
+    await repair_deleted_portal(payload.channel_id, {payload.message_id})
+
+
+@bot.event
+async def on_raw_bulk_message_delete(payload: discord.RawBulkMessageDeleteEvent):
+    await repair_deleted_portal(payload.channel_id, payload.message_ids)
 
 
 def staff(member: discord.Member) -> bool:
