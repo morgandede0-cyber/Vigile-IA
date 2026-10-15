@@ -229,8 +229,8 @@ async def start_verification(interaction: discord.Interaction, language: str = "
     )
 
 
-PORTAL_BODY_FR = PORTAL_TEXT_FR.split("\\n\\n", 1)[1]
-PORTAL_BODY_EN = PORTAL_TEXT_EN.split("\\n\\n", 1)[1]
+PORTAL_BODY_FR = PORTAL_TEXT_FR.partition("\n\n")[2] or PORTAL_TEXT_FR
+PORTAL_BODY_EN = PORTAL_TEXT_EN.partition("\n\n")[2] or PORTAL_TEXT_EN
 
 class LanguageChoice(discord.ui.View):
     """Choix privé : un seul bouton bascule FR/EN, conservé au démarrage."""
@@ -392,10 +392,9 @@ def is_vigile_portal(message: discord.Message) -> bool:
     if "VIGILE IA — PORTAIL D'ACCUEIL" in (message.content or ""):
         return True
     for component in message.components:
-        if getattr(component, "type", None) == discord.ComponentType.section:
-            for child in getattr(component, "children", []):
-                if "Million Lords" in getattr(child, "content", ""):
-                    return True
+        for child in getattr(component, "children", []):
+            if "Million Lords" in getattr(child, "content", ""):
+                return True
         if "vigile:portal" in str(component):
             return True
     return False
@@ -781,10 +780,10 @@ async def escalate_capture(message, data, result, reason):
     try:
         await mod_alert(case_id, user, result.name if result else None,
                         result.confidence if result else 0, reason, data)
-        await message.reply('🛡️ Both attempts failed. Your case has been sent to the moderators. Please wait for their decision.' if record['language'] == 'en' else '🛡️ Deux essais infructueux. Ton dossier a été transmis aux modérateurs. Attends leur décision.', mention_author=False)
+        await message.reply('🛡️ Both attempts failed. Your case has been sent to the moderators. Please wait for their decision.' if session_for(message.guild.id, user.id)['language'] == 'en' else '🛡️ Deux essais infructueux. Ton dossier a été transmis aux modérateurs. Attends leur décision.', mention_author=False)
     except (discord.HTTPException, discord.Forbidden):
         log.exception('Alerte modo impossible pour dossier %s', case_id)
-        await message.reply('⚠️ Could not contact moderators automatically. Please contact an administrator.' if record['language'] == 'en' else '⚠️ Impossible de contacter le staff automatiquement. Contacte un administrateur.', mention_author=False)
+        await message.reply('⚠️ Could not contact moderators automatically. Please contact an administrator.' if session_for(message.guild.id, user.id)['language'] == 'en' else '⚠️ Impossible de contacter le staff automatiquement. Contacte un administrateur.', mention_author=False)
 
 
 async def process_capture(message: discord.Message, confirmed_name=None):
@@ -858,7 +857,7 @@ async def vigile_reset(interaction: discord.Interaction):
 async def setup_hook():
     # Restaurer les boutons des dossiers en attente après un redémarrage.
     await bot.tree.sync()
-    bot.add_view(Portal())
+    bot.add_view(PortalActions())
     for case in DB.db.execute("SELECT id FROM cases WHERE status='pending'").fetchall():
         bot.add_view(Review(case["id"]))
     for session in DB.db.execute("SELECT user_id,channel_id,step,language FROM sessions").fetchall():
@@ -886,5 +885,4 @@ async def setup_hook():
 if __name__ == "__main__":
     if not TOKEN or TOKEN == "COLLER_TOKEN_BOT_ICI":
         raise SystemExit("Renseigner DISCORD_TOKEN dans les variables d'environnement")
-    bot.add_view(PortalActions())
-bot.run(TOKEN, log_handler=None)
+    bot.run(TOKEN, log_handler=None)

@@ -128,3 +128,11 @@ Le portail public affiche un bouton 🌐 EN sur la première rangée et un bouto
 - Un seul portail Components V2 conservé par salon, sans toucher aux messages des utilisateurs.
 - Nécessite les permissions Lire l'historique des messages, Envoyer des messages, Gérer les messages.
 - Les tests unitaires ne remplacent pas un test réel Discord Components V2.
+
+
+## V3.7 — Correctif de démarrage
+- Corrige le crash `IndexError` lié à `PORTAL_BODY_FR/EN` (séparateur incorrect).
+- Enregistre les actions persistantes du portail dans `setup_hook` et remet `bot.run` dans la garde `__main__`.
+- Corrige une référence de session non définie dans les alertes modération.
+- Conserve la présentation V2, le drapeau et le nettoyage des doublons.
+- Validation locale : import de bot.py, instanciation du portail et tests unitaires.
