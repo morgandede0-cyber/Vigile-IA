@@ -55,6 +55,35 @@ if 'origin_channel_id' not in {r['name'] for r in DB.db.execute('PRAGMA table_in
     with DB.db:
         DB.db.execute('ALTER TABLE sessions ADD COLUMN origin_channel_id INTEGER NOT NULL DEFAULT 0')
 
+# Migration des tentatives : persistance entre redémarrages.
+for column, definition in {
+    'attempts': 'INTEGER NOT NULL DEFAULT 0',
+    'first_image_url': "TEXT NOT NULL DEFAULT ''",
+    'second_image_url': "TEXT NOT NULL DEFAULT ''",
+}.items():
+    if column not in {r['name'] for r in DB.db.execute('PRAGMA table_info(sessions)')}:
+        with DB.db:
+            DB.db.execute(f'ALTER TABLE sessions ADD COLUMN {column} {definition}')
+
+
+def increment_attempt(guild_id, user_id, url):
+    with DB.db:
+        record = session_for(guild_id, user_id)
+        number = min(int(record['attempts']) + 1, 2)
+        field = 'first_image_url' if number == 1 else 'second_image_url'
+        DB.db.execute(f'UPDATE sessions SET attempts=?, {field}=? WHERE guild_id=? AND user_id=?',
+                      (number, url, guild_id, user_id))
+    return number
+
+
+def retry_or_escalate(guild_id, user_id, reason):
+    record = session_for(guild_id, user_id)
+    if record and record['attempts'] < 2:
+        set_step(guild_id, user_id, 'image')
+        return True
+    set_step(guild_id, user_id, 'pending')
+    return False
+
 
 def alert_channel_for_origin(origin_channel_id: int) -> int:
     return MOD_TEST if origin_channel_id == VIGILE_TEST else MOD
@@ -205,9 +234,23 @@ class Confirm(discord.ui.View):
     @discord.ui.button(label="Ce n'est pas mon pseudo", style=discord.ButtonStyle.secondary, custom_id="vigile:redo:placeholder")
     async def no(self, interaction, button):
         record = session_channel(interaction.channel_id)
+        if record['attempts'] >= 2:
+            await interaction.response.defer(ephemeral=True)
+            try:
+                original = await interaction.channel.fetch_message(self.message_id)
+                data = await original.attachments[0].read()
+                result = await asyncio.to_thread(extract_name, data, MIN_CONFIDENCE)
+                await escalate_capture(original, data, result, 'Le joueur conteste le pseudo reconnu au deuxième essai')
+            except (discord.HTTPException, ValueError):
+                await interaction.followup.send('Impossible de transmettre la capture. Contacte le staff.', ephemeral=True)
+                return
+            for child in self.children: child.disabled = True
+            await interaction.message.edit(view=self)
+            await interaction.followup.send('Dossier transmis au staff.', ephemeral=True)
+            return
         set_step(record['guild_id'], record['user_id'], 'image')
         for child in self.children: child.disabled = True
-        await interaction.response.edit_message(content="Envoie une nouvelle capture plus nette et complète.", view=self)
+        await interaction.response.edit_message(content='Envoie ta deuxième capture plus nette et complète.', view=self)
 
 
 async def publish_portals():
@@ -266,6 +309,26 @@ async def apply_member(member: discord.Member, name: str):
         raise RuntimeError("Hiérarchie des rôles Discord insuffisante")
     await member.edit(nick=name, reason="Vigile : capture de profil validée")
     await member.add_roles(role, reason="Vigile : capture de profil validée")
+
+
+class ApproveName(discord.ui.Modal, title='Valider le pseudo du joueur'):
+    nickname = discord.ui.TextInput(label='Pseudo exact du jeu', min_length=2, max_length=32, required=True)
+
+    def __init__(self, case_id, proposed_name):
+        super().__init__()
+        self.case_id = case_id
+        self.nickname.default = proposed_name[:32]
+
+    async def on_submit(self, interaction):
+        name = clean_name(str(self.nickname.value))
+        if not name:
+            return await interaction.response.send_message('Pseudo invalide.', ephemeral=True)
+        case = DB.get(self.case_id)
+        if not case or case['status'] != 'pending' or not isinstance(interaction.user, discord.Member) or not staff(interaction.user) or interaction.channel_id != alert_channel_for_case(case):
+            return await interaction.response.send_message('Action non autorisée ou dossier déjà traité.', ephemeral=True)
+        with DB.db:
+            DB.db.execute('UPDATE cases SET proposed_name=? WHERE id=? AND status=\'pending\'', (name, self.case_id))
+        await Review(self.case_id).decide(interaction, 'approve')
 
 
 class Review(discord.ui.View):
@@ -341,15 +404,15 @@ class Review(discord.ui.View):
 
     @discord.ui.button(label="Valider", style=discord.ButtonStyle.success, custom_id="vigile:approve:placeholder")
     async def approve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.decide(interaction, "approve")
+        case = DB.get(self.case_id)
+        if not case or case['status'] != 'pending':
+            return await interaction.response.send_message('Dossier déjà traité.', ephemeral=True)
+        await interaction.response.send_modal(ApproveName(self.case_id, case['proposed_name'] or ''))
 
     @discord.ui.button(label="Refuser", style=discord.ButtonStyle.danger, custom_id="vigile:reject:placeholder")
     async def reject_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.decide(interaction, "reject")
 
-    @discord.ui.button(label="Nouvelle capture", style=discord.ButtonStyle.secondary, custom_id="vigile:retry:placeholder")
-    async def retry_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.decide(interaction, "retry")
 
 
 async def mod_alert(case_id: int, user: discord.Member, name: str | None, confidence: float, reason: str, image: bytes):
@@ -362,9 +425,16 @@ async def mod_alert(case_id: int, user: discord.Member, name: str | None, confid
     embed.add_field(name="Confiance OCR", value=f"{confidence:.1f}%", inline=True)
     embed.add_field(name="Anomalie", value=reason, inline=False)
     embed.set_footer(text=f"Dossier #{case_id} • Capture à examiner avant validation")
-    file = discord.File(io.BytesIO(image), filename=f"capture_{case_id}.png")
-    embed.set_image(url=f"attachment://capture_{case_id}.png")
-    await channel.send(embed=embed, file=file, view=Review(case_id), allowed_mentions=discord.AllowedMentions.none())
+    session = session_for(case['guild_id'], case['user_id'])
+    if session:
+        embed.add_field(name='Capture 1', value=session['first_image_url'] or 'Indisponible', inline=False)
+        embed.add_field(name='Capture 2', value=session['second_image_url'] or 'Indisponible', inline=False)
+    if image:
+        file = discord.File(io.BytesIO(image), filename=f'capture_{case_id}.png')
+        embed.set_image(url=f'attachment://capture_{case_id}.png')
+        await channel.send(embed=embed, file=file, view=Review(case_id), allowed_mentions=discord.AllowedMentions.none())
+    else:
+        await channel.send(embed=embed, view=Review(case_id), allowed_mentions=discord.AllowedMentions.none())
 
 
 @bot.event
@@ -381,87 +451,102 @@ async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
         return
     record = session_channel(message.channel.id)
-    if not record or record['user_id'] != message.author.id:
+    if not record or record['user_id'] != message.author.id or record['step'] != 'image':
         return
-    if record['step'] != 'image':
-        return
-    attachments = [a for a in message.attachments if a.content_type and a.content_type.lower().split(';')[0] in ("image/png", "image/jpeg", "image/webp")]
+    attachments = [a for a in message.attachments if
+                   (a.content_type or '').lower().split(';')[0] in ('image/png', 'image/jpeg', 'image/webp')]
     if not attachments:
-        await message.reply("📸 Envoie une image de ton profil pour continuer.", mention_author=False)
+        await message.reply('📸 Envoie une capture PNG, JPG ou WebP de ton profil.', mention_author=False)
         return
     if attachments[0].size > MAX_BYTES:
-        await message.reply("Image trop volumineuse (8 Mo maximum).", mention_author=False)
+        await message.reply('⚠️ Image trop volumineuse (8 Mo maximum).', mention_author=False)
         return
-    try:
-        data = await attachments[0].read()
-        result = await asyncio.to_thread(extract_name, data, MIN_CONFIDENCE)
-    except (discord.HTTPException, ValueError) as exc:
-        await message.reply(f"Image illisible : {exc}", mention_author=False)
-        return
-    if not result.name or result.reason != "OK":
-        await process_capture(message)
-        if DB.pending_for_user(message.guild.id, message.author.id):
-            set_step(message.guild.id, message.author.id, 'pending')
-        return
-    set_step(message.guild.id, message.author.id, 'confirm')
-    await message.reply(f"**Étape 3/3 : confirmation**\nPseudo détecté : **{discord.utils.escape_markdown(result.name)}**. Est-ce bien le tien ?", view=Confirm(message.author.id, result.name, message.id), mention_author=False, allowed_mentions=discord.AllowedMentions.none())
-
-
-async def process_capture(message: discord.Message, confirmed_name=None):
-
-    if not isinstance(message.author, discord.Member):
-        return
-    user = message.author
-    if DB.approved_user(message.guild.id, user.id):
-        await message.reply("✅ Ton profil a déjà été validé.", mention_author=False)
-        return
-    if DB.pending_for_user(message.guild.id, user.id):
-        await message.reply("⏳ Ta précédente capture attend une décision du staff.", mention_author=False)
-        return
-    attachments = [a for a in message.attachments if a.content_type and a.content_type.lower().split(';')[0] in ("image/png", "image/jpeg", "image/webp")]
-    if not attachments:
-        await message.reply("📸 Envoie une capture complète de l'écran **Informations joueur**, avec ton pseudo visible dans la section Profil.", mention_author=False)
-        return
-    attachment = attachments[0]
-    if attachment.size > MAX_BYTES:
-        await message.reply("⚠️ Image trop volumineuse. Envoie une capture de moins de 8 Mo.", mention_author=False)
-        return
-    try:
-        data = await attachment.read()
-        if len(data) > MAX_BYTES:
-            raise ValueError("Image trop volumineuse")
-        result = await asyncio.to_thread(extract_name, data, MIN_CONFIDENCE)
-    except (discord.HTTPException, ValueError) as exc:
-        await message.reply(f"⚠️ Impossible de lire cette image : {exc}", mention_author=False)
-        return
-    digest = hashlib.sha256(data).hexdigest()
-    reason = result.reason if result.reason != "OK" else duplicate_reason(message.guild, user.id, result.name, digest)
-    if confirmed_name is not None and result.name != confirmed_name:
-        reason = "Le pseudo reconnu a changé entre la lecture et la confirmation"
-    # Même en cas de confiance élevée, une capture ne prouve pas la propriété du compte.
-    # Ici la validation automatique est limitée aux captures conformes sans conflit connu.
-    if reason is None:
-        try:
-            await apply_member(user, result.name)
-        except (discord.Forbidden, discord.HTTPException, RuntimeError) as exc:
-            reason = f"Échec de configuration Discord : {exc}"
-        else:
-            case_id = DB.create_case(message.guild.id, user.id, message.id, digest, attachment.url, result.name, result.confidence, "Validation automatique")
-            if case_id is not None:
-                DB.approve(case_id, result.name)
-            await message.reply(f"✅ Bienvenue {discord.utils.escape_markdown(result.name)} ! Ton surnom et le rôle **Membres** ont été attribués. Ce salon privé sera supprimé dans 10 secondes.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
-            set_step(message.guild.id, user.id, "done")
-            asyncio.create_task(close_session(message.guild.id, user.id))
+    # Verrou par joueur : deux images envoyées simultanément ne créent pas deux dossiers.
+    lock = locks.setdefault(('upload', message.guild.id, message.author.id), asyncio.Lock())
+    async with lock:
+        record = session_channel(message.channel.id)
+        if not record or record['step'] != 'image':
             return
-    case_id = DB.create_case(message.guild.id, user.id, message.id, digest, attachment.url, result.name, result.confidence, reason or "Vérification requise")
+        attempt = increment_attempt(message.guild.id, message.author.id, attachments[0].url)
+        try:
+            data = await attachments[0].read()
+            result = await asyncio.to_thread(extract_name, data, MIN_CONFIDENCE)
+        except (discord.HTTPException, ValueError) as exc:
+            result = None
+            reason = f'Image impossible à lire : {type(exc).__name__}'
+        else:
+            reason = result.reason
+        if result and result.name and result.reason == 'OK':
+            reason = duplicate_reason(message.guild, message.author.id, result.name, hashlib.sha256(data).hexdigest())
+            if reason is None:
+                set_step(message.guild.id, message.author.id, 'confirm')
+                await message.reply(
+                    f'**Étape 3/3 — Essai {attempt}/2**\nPseudo détecté : **{discord.utils.escape_markdown(result.name)}**. Est-ce bien ton pseudo ?',
+                    view=Confirm(message.author.id, result.name, message.id),
+                    mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+                return
+        if retry_or_escalate(message.guild.id, message.author.id, reason):
+            await message.reply(
+                f'⚠️ Première tentative non validée : {reason}.\n'
+                '**Tu as droit à un deuxième essai.** Envoie une nouvelle capture avec le pseudo bien visible.',
+                mention_author=False)
+            return
+        await escalate_capture(message, data if result else b'', result, reason)
+
+
+async def escalate_capture(message, data, result, reason):
+    user = message.author
+    attachment = message.attachments[0]
+    digest = hashlib.sha256(data).hexdigest() if data else hashlib.sha256(attachment.url.encode()).hexdigest()
+    case_id = DB.create_case(message.guild.id, user.id, message.id, digest, attachment.url,
+                             result.name if result else None, result.confidence if result else 0, reason)
     if case_id is None:
         return
     try:
-        await mod_alert(case_id, user, result.name, result.confidence, reason, data)
-        await message.reply("🛡️ Ta capture nécessite une vérification. Un modérateur a été prévenu ; aucun rôle n'a été attribué.", mention_author=False)
-    except discord.HTTPException:
-        log.exception("Impossible d'envoyer l'alerte au salon Modo pour dossier %s", case_id)
-        await message.reply("⚠️ Vérification suspendue : le staff n'a pas pu être contacté. Contacte un administrateur.", mention_author=False)
+        await mod_alert(case_id, user, result.name if result else None,
+                        result.confidence if result else 0, reason, data)
+        await message.reply('🛡️ Deux essais infructueux. Ton dossier a été transmis aux modérateurs. Attends leur décision.', mention_author=False)
+    except (discord.HTTPException, discord.Forbidden):
+        log.exception('Alerte modo impossible pour dossier %s', case_id)
+        await message.reply('⚠️ Impossible de contacter le staff automatiquement. Contacte un administrateur.', mention_author=False)
+
+
+async def process_capture(message: discord.Message, confirmed_name=None):
+    # Une confirmation n'est pas une nouvelle tentative : la capture a déjà été comptée.
+    user = message.author
+    record = session_for(message.guild.id, user.id)
+    if not record or DB.approved_user(message.guild.id, user.id) or DB.pending_for_user(message.guild.id, user.id):
+        return
+    try:
+        data = await message.attachments[0].read()
+        result = await asyncio.to_thread(extract_name, data, MIN_CONFIDENCE)
+    except (discord.HTTPException, ValueError) as exc:
+        data, result = b'', None
+        reason = f'Erreur de lecture : {type(exc).__name__}'
+    else:
+        reason = result.reason if result.reason != 'OK' else duplicate_reason(
+            message.guild, user.id, result.name, hashlib.sha256(data).hexdigest())
+        if confirmed_name is not None and result.name != confirmed_name:
+            reason = 'Pseudo différent de celui confirmé'
+    if reason is None and result:
+        try:
+            await apply_member(user, result.name)
+        except (discord.Forbidden, discord.HTTPException, RuntimeError) as exc:
+            reason = f'Erreur de configuration Discord : {exc}'
+        else:
+            digest = hashlib.sha256(data).hexdigest()
+            case_id = DB.create_case(message.guild.id, user.id, message.id, digest,
+                                     message.attachments[0].url, result.name, result.confidence, 'Validation automatique')
+            if case_id is not None:
+                DB.approve(case_id, result.name)
+            await message.reply(f'✅ Bienvenue **{discord.utils.escape_markdown(result.name)}** ! Rôle Membres attribué. Fermeture dans 10 secondes.', mention_author=False)
+            set_step(message.guild.id, user.id, 'done')
+            asyncio.create_task(close_session(message.guild.id, user.id))
+            return
+    if retry_or_escalate(message.guild.id, user.id, reason):
+        await message.reply(f'⚠️ {reason}. Tu peux envoyer une deuxième capture.', mention_author=False)
+    else:
+        await escalate_capture(message, data, result, reason)
 
 
 @bot.event

@@ -83,3 +83,14 @@ Les salons privés sont créés dans la catégorie du salon portail, mais avec d
 ## V2.2 — Alertes de test séparées
 
 Les vérifications démarrées depuis `VIGILE_TEST_CHANNEL_ID` envoient leurs alertes et boutons de modération vers `MOD_TEST_CHANNEL_ID`. Les autres vérifications utilisent `MOD_CHANNEL_ID`. L'origine du parcours est enregistrée dans SQLite dès la création du salon privé et conservée pendant la vérification. La migration de base de données est automatique. Les anciennes sessions créées avant cette version utilisent le salon Modo principal (origine inconnue).
+
+## V2.3 — Deux essais avant alerte staff
+- Première capture non reconnue, suspecte ou en conflit : demande d'une deuxième capture, sans alerte modo.
+- Deuxième capture problématique : dossier `pending`, alerte dans Modo Test ou Modo principal selon le portail d'origine, avec liens vers les deux captures.
+- Si le joueur refuse le pseudo OCR à la deuxième tentative : transmission au staff.
+- Bouton **Valider** : ouvre une fenêtre permettant au modérateur de saisir ou corriger le pseudo exact avant d'attribuer le rôle Membres.
+- Bouton **Refuser** : aucun rôle, fermeture du salon privé après 10 secondes ; le dossier reste dans le salon Modo.
+- Les compteurs et les URLs des captures sont persistés dans SQLite (`/app/data` à monter en volume persistant sur Coolify).
+- Pour les sessions déjà ouvertes avant la V2.3, le compteur commence à zéro.
+
+Note : l'OCR ne prouve pas la propriété du compte de jeu. Les contrôles de duplication bloquent la validation même par le staff ; un administrateur doit résoudre les conflits manuellement.
