@@ -79,3 +79,23 @@ V2.8 : `/vigile-portail` est autorisé dans le salon principal et le salon test 
 - Salon Vigile principal : rôle `1522696283595472916`.
 - Variable Coolify facultative `MEMBER_TEST_ROLE_ID=1552119593038909501`.
 - Le bot doit avoir le droit Gérer les rôles et un rôle supérieur aux deux rôles cibles.
+
+
+## V3.0 — Protection anti-doublons
+- Chaque vérification scanne les 1000 derniers messages du salon Vigile (principal et test).
+- Reconnaît uniquement les messages du bot portant le bouton `vigile:portal:start`.
+- Conserve le portail enregistré dans SQLite, sinon le plus récent, et supprime les autres.
+- Reconstitue le suivi SQLite si la base a été recréée.
+- Si la lecture de l’historique échoue, ne republie rien afin de ne pas créer de doublon.
+- Exige les permissions Voir le salon, Lire l’historique, Envoyer des messages et Gérer les messages (suppression des doublons).
+- La commande `/vigile-portail` permet aussi de nettoyer les doublons.
+- Limite : les portails situés au-delà des 1000 derniers messages ne sont pas inspectés.
+
+## V3.1 — Validation modérateur et OCR
+- Corrige l'erreur de validation modérateur causée par l'accès `.get()` sur un `sqlite3.Row` : le rôle dépend maintenant directement de l'origine du dossier, même si la session a disparu.
+- Recherche les membres absents du cache Discord via `fetch_member`.
+- Supprime le message d'alerte et ses captures du salon staff après une validation ou un refus **réussi**. L'historique SQLite reste conservé.
+- OCR ciblé sur le pseudo jaune sous « Profil », avec masquage des libellés blancs. Les mots d'interface comme « Profil » sont interdits comme pseudo.
+- La validation échouée conserve le dossier en attente pour permettre une nouvelle tentative.
+- Permissions nécessaires : Gérer les pseudos, Gérer les rôles, Gérer les messages ; le rôle du bot doit être au-dessus du joueur et du rôle attribué. Pour les modérateurs, Gérer le serveur ou Gérer les salons ou STAFF_ROLE_ID.
+- Tester les deux parcours (automatique et validation staff) sur Discord ; les tests unitaires ne simulent pas les permissions Discord ni une capture réelle de jeu.

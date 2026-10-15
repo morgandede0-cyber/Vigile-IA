@@ -417,6 +417,8 @@ async def apply_member(member: discord.Member, name: str, origin_channel_id: int
         raise RuntimeError("Permissions Gérer les pseudos / Gérer les rôles manquantes")
     if me.top_role <= role or me.top_role <= member.top_role or member == member.guild.owner:
         raise RuntimeError("Hiérarchie des rôles Discord insuffisante")
+    # Discord autorise l'attribution d'un rôle et la modification du surnom uniquement
+    # si le rôle du bot est strictement supérieur à celui du membre.
     await member.edit(nick=name, reason="Vigile : capture de profil validée")
     await member.add_roles(role, reason="Vigile : capture de profil validée")
 
@@ -465,6 +467,11 @@ class Review(discord.ui.View):
                 return
             guild = interaction.guild
             member = guild.get_member(case["user_id"]) if guild else None
+            if member is None and guild is not None:
+                try:
+                    member = await guild.fetch_member(case["user_id"])
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    log.exception("Impossible de récupérer le membre %s", case["user_id"])
             if action == "approve":
                 if member is None:
                     await interaction.followup.send("Membre introuvable : aucune modification effectuée.", ephemeral=True)
@@ -478,7 +485,7 @@ class Review(discord.ui.View):
                     await interaction.followup.send(f"Validation bloquée : {problem}.", ephemeral=True)
                     return
                 try:
-                    await apply_member(member, name, (session_for(guild.id, member.id) or {}).get("origin_channel_id", 0))
+                    await apply_member(member, name, case["origin_channel_id"])
                 except (discord.Forbidden, discord.HTTPException, RuntimeError) as exc:
                     log.warning("Validation échouée pour %s : %s", member.id, exc)
                     await interaction.followup.send(f"Échec Discord : {exc}. Vérifie les permissions et réessaie.", ephemeral=True)
@@ -506,10 +513,17 @@ class Review(discord.ui.View):
                         pass
             for child in self.children:
                 child.disabled = True
+            # Supprimer l'alerte uniquement après une décision enregistrée.
             try:
-                await interaction.message.edit(content=f"**Dossier #{self.case_id} — {outcome}**", view=self)
-            except discord.HTTPException:
-                pass
+                if interaction.message:
+                    await interaction.message.delete()
+            except (discord.Forbidden, discord.HTTPException):
+                log.exception("Suppression de l'alerte %s impossible", self.case_id)
+                try:
+                    if interaction.message:
+                        await interaction.message.edit(content=f"**Dossier #{self.case_id} — {outcome}**", embed=None, attachments=[], view=self)
+                except discord.HTTPException:
+                    pass
             await interaction.followup.send(outcome, ephemeral=True)
 
     @discord.ui.button(label="Valider", style=discord.ButtonStyle.success, custom_id="vigile:approve:placeholder")
