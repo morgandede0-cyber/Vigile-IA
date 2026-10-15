@@ -118,3 +118,13 @@ Le portail affiche le nouveau texte de bienvenue IV en français. Deux boutons �
 
 ## V3.5 — Un seul sélecteur de langue
 Le portail public affiche un bouton 🌐 EN sur la première rangée et un bouton Commencer sur la seconde. Le bouton langue ouvre un affichage privé où un seul bouton bascule FR/EN, avec démarrage dans la langue choisie. La langue est enregistrée en base dans sessions.language et utilisée pour le règlement et les instructions de capture. Discord ne permet pas de placer les boutons au coin supérieur droit du texte ; la première rangée est le placement le plus proche possible sans Activity. Les outils de modération et certains messages techniques restent en français.
+
+
+## V3.6 — Portail Components V2 et anti-doublons
+- Bouton 🇫🇷 en accessoire à droite du titre (Section Components V2).
+- Un clic ouvre le choix de langue privé 🇫🇷 / 🇬🇧, sans modifier le portail des autres.
+- Le choix de langue s'applique au parcours de vérification, comme dans V3.5.
+- Nettoyage des anciens portails du bot en scannant les 500 derniers messages et l'ancien message enregistré en SQLite.
+- Un seul portail Components V2 conservé par salon, sans toucher aux messages des utilisateurs.
+- Nécessite les permissions Lire l'historique des messages, Envoyer des messages, Gérer les messages.
+- Les tests unitaires ne remplacent pas un test réel Discord Components V2.

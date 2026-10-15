@@ -229,6 +229,9 @@ async def start_verification(interaction: discord.Interaction, language: str = "
     )
 
 
+PORTAL_BODY_FR = PORTAL_TEXT_FR.split("\\n\\n", 1)[1]
+PORTAL_BODY_EN = PORTAL_TEXT_EN.split("\\n\\n", 1)[1]
+
 class LanguageChoice(discord.ui.View):
     """Choix privé : un seul bouton bascule FR/EN, conservé au démarrage."""
     def __init__(self, lang: str = "fr"):
@@ -251,21 +254,55 @@ class LanguageChoice(discord.ui.View):
         await start_verification(interaction, self.lang)
 
 
-class Portal(discord.ui.View):
+class Portal(discord.ui.LayoutView):
+    """Components V2: drapeau en accessoire du titre, en haut à droite."""
+    def __init__(self):
+        super().__init__(timeout=None)
+        section = discord.ui.Section(
+            discord.ui.TextDisplay("## 🛡️ Bienvenue sur ⌁ IV ⌁ | Million Lords"),
+            accessory=discord.ui.Button(
+                style=discord.ButtonStyle.secondary,
+                emoji="🇫🇷",
+                custom_id="vigile:portal:language",
+            ),
+        )
+        self.add_item(section)
+        self.add_item(discord.ui.TextDisplay(PORTAL_BODY_FR))
+        self.add_item(discord.ui.ActionRow(
+            discord.ui.Button(
+                style=discord.ButtonStyle.success,
+                label="Commencer ma vérification",
+                emoji="🛡️",
+                custom_id="vigile:portal:start",
+            )
+        ))
+
+
+async def portal_language_click(interaction: discord.Interaction):
+    # La langue ne change que pour ce joueur : le portail reste en français pour les autres.
+    await interaction.response.send_message(
+        PORTAL_TEXT_FR, view=LanguageChoice("fr"), ephemeral=True
+    )
+
+
+async def portal_start_click(interaction: discord.Interaction):
+    await start_verification(interaction, "fr")
+
+
+class PortalActions(discord.ui.View):
+    """Routeur persistant pour les custom_id des boutons Components V2."""
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="🌐 EN", style=discord.ButtonStyle.secondary, custom_id="vigile:portal:language", row=0)
+    @discord.ui.button(emoji="🇫🇷", style=discord.ButtonStyle.secondary,
+                       custom_id="vigile:portal:language")
     async def language(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Discord ne permet pas de placer un bouton au-dessus d'un texte :
-        # première rangée du portail, choix privé sans modifier la langue des autres.
-        await interaction.response.send_message(
-            PORTAL_TEXT_FR, view=LanguageChoice("fr"), ephemeral=True
-        )
+        await portal_language_click(interaction)
 
-    @discord.ui.button(label="Commencer ma vérification", style=discord.ButtonStyle.success, emoji="🛡️", custom_id="vigile:portal:start", row=1)
+    @discord.ui.button(label="Commencer ma vérification", emoji="🛡️",
+                       style=discord.ButtonStyle.success, custom_id="vigile:portal:start")
     async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await start_verification(interaction, "fr")
+        await portal_start_click(interaction)
 
 
 class Rules(discord.ui.View):
@@ -347,6 +384,23 @@ async def publish_portals():
         await ensure_portal(channel_id)
 
 
+def is_vigile_portal(message: discord.Message) -> bool:
+    if not bot.user or message.author.id != bot.user.id:
+        return False
+    if ("Bienvenue sur" in (message.content or "") and "Million Lords" in (message.content or "")):
+        return True
+    if "VIGILE IA — PORTAIL D'ACCUEIL" in (message.content or ""):
+        return True
+    for component in message.components:
+        if getattr(component, "type", None) == discord.ComponentType.section:
+            for child in getattr(component, "children", []):
+                if "Million Lords" in getattr(child, "content", ""):
+                    return True
+        if "vigile:portal" in str(component):
+            return True
+    return False
+
+
 async def ensure_portal(channel_id: int) -> str:
     lock = portal_publish_locks.setdefault(channel_id, asyncio.Lock())
     async with lock:
@@ -355,47 +409,54 @@ async def ensure_portal(channel_id: int) -> str:
             try:
                 channel = await bot.fetch_channel(channel_id)
             except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
-                log.error("Portail %s inaccessible : %r", channel_id, exc)
-                return "Salon inaccessible : vérifie son ID et les permissions du bot."
+                log.error("Salon Vigile %s inaccessible : %r", channel_id, exc)
+                return "Salon inaccessible."
         if not isinstance(channel, discord.TextChannel):
-            log.error("Portail %s n'est pas un salon textuel.", channel_id)
-            return "Le salon configuré n'est pas un salon textuel."
-        existing = DB.db.execute(
-            "SELECT message_id FROM portal_messages WHERE channel_id=?", (channel_id,)
-        ).fetchone()
-        if existing:
-            try:
-                old_portal = await channel.fetch_message(existing["message_id"])
-                if old_portal.author.id == bot.user.id:
-                    if old_portal.content != PORTAL_TEXT_FR or len(old_portal.components) < 2:
-                        await old_portal.edit(content=PORTAL_TEXT_FR, view=Portal())
-                        log.info("Portail mis à jour dans %s", channel_id)
-                        return "Portail mis à jour."
-                log.info("Portail existant dans %s : %s", channel_id, existing["message_id"])
-                return "Portail déjà présent."
-            except discord.NotFound:
-                log.warning("Portail supprimé dans %s, republication.", channel_id)
-            except discord.Forbidden:
-                log.error("Permission Lire l'historique manquante dans %s", channel_id)
-                return "Permission Lire l'historique des messages manquante."
-            except discord.HTTPException as exc:
-                log.error("Impossible de vérifier le portail %s : %r", channel_id, exc)
-                return "Erreur Discord lors de la vérification du portail."
+            return "Salon non textuel."
         try:
-            msg = await channel.send(PORTAL_TEXT_FR, view=Portal())
+            # Rechercher dans l'historique, pas uniquement dans SQLite :
+            # un redéploiement ou une ancienne version peut avoir créé des doublons.
+            portals = []
+            async for message in channel.history(limit=500):
+                if is_vigile_portal(message):
+                    portals.append(message)
+            tracked = DB.db.execute(
+                "SELECT message_id FROM portal_messages WHERE channel_id=?", (channel_id,)
+            ).fetchone()
+            if tracked and tracked["message_id"] not in {m.id for m in portals}:
+                try:
+                    old_tracked = await channel.fetch_message(tracked["message_id"])
+                    if is_vigile_portal(old_tracked):
+                        portals.append(old_tracked)
+                except discord.NotFound:
+                    pass
+            # Un portail V2 récent est conservé en priorité.
+            valid = [m for m in portals if m.flags.is_components_v2]
+            keep = max(valid, key=lambda m: m.id) if valid else None
+            if keep is None:
+                # Supprimer les anciens portails AVANT d'envoyer le nouveau.
+                # Ne pas supprimer de messages de joueurs.
+                for old in portals:
+                    await old.delete()
+                keep = await channel.send(view=Portal())
+            else:
+                # Nettoyage des autres messages de portail du bot uniquement.
+                for old in portals:
+                    if old.id != keep.id:
+                        await old.delete()
             with DB.db:
                 DB.db.execute(
                     "INSERT OR REPLACE INTO portal_messages(channel_id,message_id) VALUES (?,?)",
-                    (channel_id, msg.id),
+                    (channel_id, keep.id),
                 )
-            log.info("Portail publié dans %s : %s", channel_id, msg.id)
-            return "Portail publié."
+            log.info("Portail unique dans %s : %s (%s anciens)", channel_id, keep.id, max(0, len(portals)-1))
+            return "Portail présent, doublons nettoyés."
         except discord.Forbidden:
-            log.error("Permission Envoyer des messages manquante dans %s", channel_id)
-            return "Permission Envoyer des messages manquante."
-        except discord.HTTPException as exc:
-            log.exception("Publication du portail impossible dans %s : %r", channel_id, exc)
-            return "Erreur Discord pendant la publication."
+            log.exception("Permissions insuffisantes pour lire ou nettoyer le portail %s", channel_id)
+            return "Permissions manquantes : Lire l'historique, Envoyer et Gérer les messages."
+        except discord.HTTPException:
+            log.exception("Impossible de publier/nettoyer le portail %s", channel_id)
+            return "Erreur Discord : consulter les logs Coolify."
 
 
 @tasks.loop(seconds=60)
@@ -825,4 +886,5 @@ async def setup_hook():
 if __name__ == "__main__":
     if not TOKEN or TOKEN == "COLLER_TOKEN_BOT_ICI":
         raise SystemExit("Renseigner DISCORD_TOKEN dans les variables d'environnement")
-    bot.run(TOKEN, log_handler=None)
+    bot.add_view(PortalActions())
+bot.run(TOKEN, log_handler=None)
