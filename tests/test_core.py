@@ -17,6 +17,22 @@ class CoreTests(unittest.TestCase):
         result = extract_name(b'not an image')
         self.assertIsNone(result.name)
 
+    def test_test_reset_is_isolated(self):
+        with tempfile.TemporaryDirectory() as d:
+            db = Storage(Path(d)/'test.sqlite3')
+            test_case = db.create_case(1, 10, 100, 'h1', 'url', 'Test', 95, 'OK', 222)
+            prod_case = db.create_case(1, 20, 200, 'h2', 'url', 'Prod', 95, 'OK', 111)
+            self.assertTrue(db.approve(test_case, 'Test'))
+            self.assertTrue(db.approve(prod_case, 'Prod'))
+            db.db.execute("CREATE TABLE sessions (guild_id INTEGER, user_id INTEGER, channel_id INTEGER, origin_channel_id INTEGER)")
+            db.db.execute("INSERT INTO sessions VALUES (1,10,300,222)")
+            db.db.execute("INSERT INTO sessions VALUES (1,20,400,111)")
+            a,p,channels = db.reset_test(1,222,999)
+            self.assertEqual((a,p,channels),(1,0,[300]))
+            self.assertIsNone(db.approved_user(1,10))
+            self.assertTrue(db.approved_user(1,20))
+            self.assertEqual(db.db.execute('SELECT COUNT(*) FROM sessions').fetchone()[0],1)
+
     def test_storage(self):
         with tempfile.TemporaryDirectory() as d:
             db = Storage(Path(d)/'test.sqlite3')

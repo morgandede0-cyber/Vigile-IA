@@ -12,6 +12,7 @@ import sqlite3
 
 import discord
 from discord.ext import commands
+from discord import app_commands
 from dotenv import load_dotenv
 
 from ocr import clean_name, extract_name
@@ -499,7 +500,8 @@ async def escalate_capture(message, data, result, reason):
     attachment = message.attachments[0]
     digest = hashlib.sha256(data).hexdigest() if data else hashlib.sha256(attachment.url.encode()).hexdigest()
     case_id = DB.create_case(message.guild.id, user.id, message.id, digest, attachment.url,
-                             result.name if result else None, result.confidence if result else 0, reason)
+                             result.name if result else None, result.confidence if result else 0, reason,
+                             session_for(message.guild.id, user.id)["origin_channel_id"])
     if case_id is None:
         return
     try:
@@ -536,7 +538,8 @@ async def process_capture(message: discord.Message, confirmed_name=None):
         else:
             digest = hashlib.sha256(data).hexdigest()
             case_id = DB.create_case(message.guild.id, user.id, message.id, digest,
-                                     message.attachments[0].url, result.name, result.confidence, 'Validation automatique')
+                                     message.attachments[0].url, result.name, result.confidence, 'Validation automatique',
+                                     record['origin_channel_id'])
             if case_id is not None:
                 DB.approve(case_id, result.name)
             await message.reply(f'✅ Bienvenue **{discord.utils.escape_markdown(result.name)}** ! Rôle Membres attribué. Fermeture dans 10 secondes.', mention_author=False)
@@ -549,9 +552,38 @@ async def process_capture(message: discord.Message, confirmed_name=None):
         await escalate_capture(message, data, result, reason)
 
 
+@bot.tree.command(name="vigile-reset", description="Réinitialiser uniquement les vérifications du portail de test")
+@app_commands.default_permissions(manage_guild=True)
+async def vigile_reset(interaction: discord.Interaction):
+    # Les commandes slash ne sont pas masquables dynamiquement par salon ; refus strict ailleurs.
+    if not interaction.guild or interaction.channel_id != VIGILE_TEST:
+        return await interaction.response.send_message(
+            "Commande autorisée uniquement dans le salon Vigile Test.", ephemeral=True)
+    if not isinstance(interaction.user, discord.Member) or not staff(interaction.user):
+        return await interaction.response.send_message("Réservé au staff autorisé.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    approved, pending, channels = DB.reset_test(interaction.guild.id, VIGILE_TEST, interaction.user.id)
+    failed = 0
+    for channel_id in channels:
+        channel = interaction.guild.get_channel(channel_id)
+        if channel:
+            try:
+                await channel.delete(reason=f"Vigile IA : reset test par {interaction.user.id}")
+            except (discord.Forbidden, discord.HTTPException):
+                failed += 1
+                log.exception("Impossible de supprimer le salon test %s", channel_id)
+    await interaction.followup.send(
+        f"✅ Tests réinitialisés : {approved} validation(s), {pending} dossier(s) en attente, "
+        f"{len(channels)-failed} salon(s) fermé(s). "
+        "Les rôles Discord ne sont pas retirés. Les validations historiques sans origine connue "
+        "et les dossiers officiels sont conservés." +
+        (f" ⚠️ {failed} salon(s) n'ont pas pu être supprimés." if failed else ""), ephemeral=True)
+
+
 @bot.event
 async def setup_hook():
     # Restaurer les boutons des dossiers en attente après un redémarrage.
+    await bot.tree.sync()
     bot.add_view(Portal())
     for case in DB.db.execute("SELECT id FROM cases WHERE status='pending'").fetchall():
         bot.add_view(Review(case["id"]))

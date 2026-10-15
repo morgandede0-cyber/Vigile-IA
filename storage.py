@@ -28,15 +28,20 @@ class Storage:
           PRIMARY KEY(guild_id,user_id)
         );
         ''')
+        # Provenance des validations : indispensable pour ne réinitialiser QUE les tests.
+        for table in ('cases', 'approvals'):
+            columns = {r['name'] for r in self.db.execute(f'PRAGMA table_info({table})')}
+            if 'origin_channel_id' not in columns:
+                self.db.execute(f'ALTER TABLE {table} ADD COLUMN origin_channel_id INTEGER NOT NULL DEFAULT 0')
         self.db.commit()
 
-    def create_case(self, guild, user, message, digest, url, name, confidence, reason):
+    def create_case(self, guild, user, message, digest, url, name, confidence, reason, origin_channel_id=0):
         now = datetime.now(timezone.utc).isoformat()
         with self.db:
             cur = self.db.execute('''INSERT OR IGNORE INTO cases
-            (guild_id,user_id,message_id,image_sha256,image_url,proposed_name,confidence,reason,status,created_at,updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
-            (guild,user,message,digest,url,name,confidence,reason,"pending",now,now))
+            (guild_id,user_id,message_id,image_sha256,image_url,proposed_name,confidence,reason,status,created_at,updated_at,origin_channel_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''',
+            (guild,user,message,digest,url,name,confidence,reason,"pending",now,now,origin_channel_id))
             return cur.lastrowid if cur.rowcount else None
 
     def get(self, case_id):
@@ -65,6 +70,27 @@ class Storage:
             return False
         now = datetime.now(timezone.utc).isoformat()
         with self.db:
-            self.db.execute("INSERT INTO approvals(guild_id,user_id,nickname,image_sha256,approved_at) VALUES (?,?,?,?,?) ON CONFLICT(guild_id,user_id) DO UPDATE SET nickname=excluded.nickname,image_sha256=excluded.image_sha256,approved_at=excluded.approved_at", (case['guild_id'],case['user_id'],name,case['image_sha256'],now))
+            self.db.execute("INSERT INTO approvals(guild_id,user_id,nickname,image_sha256,approved_at,origin_channel_id) VALUES (?,?,?,?,?,?) ON CONFLICT(guild_id,user_id) DO UPDATE SET nickname=excluded.nickname,image_sha256=excluded.image_sha256,approved_at=excluded.approved_at,origin_channel_id=excluded.origin_channel_id", (case['guild_id'],case['user_id'],name,case['image_sha256'],now,case['origin_channel_id']))
             self.db.execute("UPDATE cases SET status='approved',reviewer_id=?,updated_at=? WHERE id=?", (reviewer,now,case_id))
         return True
+
+    def reset_test(self, guild_id, test_channel_id, actor_id):
+        """Remet les validations TEST à zéro sans toucher aux validations officielles.
+        Les anciens enregistrements sans origine (0) restent protégés.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self.db:
+            approvals = self.db.execute(
+                "DELETE FROM approvals WHERE guild_id=? AND origin_channel_id=?",
+                (guild_id, test_channel_id)).rowcount
+            pending = self.db.execute(
+                "UPDATE cases SET status='test_reset', reviewer_id=?, updated_at=? "
+                "WHERE guild_id=? AND origin_channel_id=? AND status='pending'",
+                (actor_id, now, guild_id, test_channel_id)).rowcount
+            sessions = self.db.execute(
+                "SELECT channel_id FROM sessions WHERE guild_id=? AND origin_channel_id=?",
+                (guild_id, test_channel_id)).fetchall()
+            self.db.execute(
+                "DELETE FROM sessions WHERE guild_id=? AND origin_channel_id=?",
+                (guild_id, test_channel_id))
+        return approvals, pending, [row['channel_id'] for row in sessions]
