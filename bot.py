@@ -381,7 +381,10 @@ class Confirm(discord.ui.View):
 
 async def publish_portals():
     for channel_id in sorted(VIGILE_CHANNELS):
-        await ensure_portal(channel_id)
+        try:
+            await ensure_portal(channel_id)
+        except Exception:
+            log.exception("Erreur imprévue de surveillance du portail %s", channel_id)
 
 
 def is_vigile_portal(message: discord.Message) -> bool:
@@ -430,19 +433,18 @@ async def ensure_portal(channel_id: int) -> str:
                 except discord.NotFound:
                     pass
             # Un portail V2 récent est conservé en priorité.
-            valid = [m for m in portals if m.flags.is_components_v2]
+            valid = [m for m in portals if m.flags.components_v2]
             keep = max(valid, key=lambda m: m.id) if valid else None
             if keep is None:
-                # Supprimer les anciens portails AVANT d'envoyer le nouveau.
-                # Ne pas supprimer de messages de joueurs.
-                for old in portals:
-                    await old.delete()
+                # Publier d'abord : une erreur d'envoi ne doit pas faire disparaître l'ancien portail.
                 keep = await channel.send(view=Portal())
-            else:
-                # Nettoyage des autres messages de portail du bot uniquement.
-                for old in portals:
-                    if old.id != keep.id:
+            # Supprimer uniquement les autres portails identifiés comme appartenant au bot.
+            for old in portals:
+                if old.id != keep.id:
+                    try:
                         await old.delete()
+                    except (discord.Forbidden, discord.HTTPException):
+                        log.exception("Impossible de supprimer le doublon %s dans %s", old.id, channel_id)
             with DB.db:
                 DB.db.execute(
                     "INSERT OR REPLACE INTO portal_messages(channel_id,message_id) VALUES (?,?)",

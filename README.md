@@ -136,3 +136,11 @@ Le portail public affiche un bouton 🌐 EN sur la première rangée et un bouto
 - Corrige une référence de session non définie dans les alertes modération.
 - Conserve la présentation V2, le drapeau et le nettoyage des doublons.
 - Validation locale : import de bot.py, instanciation du portail et tests unitaires.
+
+
+## V3.8 — Correctifs des logs Coolify
+- `MessageFlags.components_v2` remplace `is_components_v2` (plantage de la commande et de la surveillance).
+- Erreurs de surveillance isolées par salon.
+- Nouveau portail envoyé avant nettoyage des anciens, et suppression de doublons sans arrêter la surveillance en cas de refus.
+- **À corriger dans Discord/Coolify** : accès du bot au salon principal `1522707744828821765` (403 Missing Access), et `MEMBER_ROLE_ID` correspondant à un rôle existant dans le serveur (les logs indiquent `rôle principal=False`).
+- Les permissions et le rôle ne peuvent pas être réparés depuis le code.
