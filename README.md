@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Vigile IA Discord — V1.0
 
 Bot autonome de contrôle des arrivées : lecture OCR des captures de profil, surnom Discord, rôle Membres, alertes et boutons de décision pour le staff.
@@ -54,3 +55,6 @@ python -m compileall -q .
 
 Les captures sont acceptées dans les deux salons configurés par `VIGILE_CHANNEL_IDS` (IDs séparés par des virgules). Le salon Test exécute les mêmes actions réelles que le salon principal, y compris l’attribution du rôle et le changement de surnom. Les alertes restent centralisées dans le salon Modo.
 
+=======
+# Vigile-IA
+>>>>>>> origin/main
