@@ -9,6 +9,7 @@ import os
 import re
 import unicodedata
 import sqlite3
+import time
 
 import discord
 from discord.ext import commands, tasks
@@ -42,6 +43,18 @@ intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!vigile_unused_", intents=intents, help_command=None)
 locks = {}
+# Notifications discrètes par défaut : aucun DM automatique après une décision.
+VIGILE_SEND_DM = os.getenv("VIGILE_SEND_DM", "false").lower() in ("1", "true", "yes")
+# Ne pas répondre à chaque message hors-sujet ou fichier incorrect.
+INVALID_MESSAGE_COOLDOWN = max(10, int(os.getenv("INVALID_MESSAGE_COOLDOWN", "60")))
+last_invalid_notice = {}
+def should_warn_invalid(guild_id: int, user_id: int, kind: str) -> bool:
+    key = (guild_id, user_id, kind)
+    now = time.monotonic()
+    if now - last_invalid_notice.get(key, -1e12) < INVALID_MESSAGE_COOLDOWN:
+        return False
+    last_invalid_notice[key] = now
+    return True
 portal_repair_tasks = {}
 portal_publish_locks = {}
 
@@ -144,6 +157,11 @@ async def close_session(guild_id: int, user_id: int, delay: int = 10):
         DB.db.execute("DELETE FROM sessions WHERE guild_id=? AND user_id=? AND channel_id=?", (guild_id, user_id, channel_id))
 
 
+ENGLAND_FLAG = '🏴\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f'
+
+def tr(lang: str, fr: str, en: str) -> str:
+    return en if lang == "en" else fr
+
 PORTAL_TEXT_FR = ("# 🛡️ Bienvenue sur ⌁ IV ⌁ | Million Lords\n\n"
     "**IV est bien plus qu’un clan : c’est une communauté** unie par la passion du jeu, l’entraide et l’aventure.\n\n"
     "Pour rejoindre nos rangs, **Vigile IA** vous accompagnera dans une courte vérification de votre identité en jeu.\n\n"
@@ -176,11 +194,11 @@ RULES_EN = ("# 📜 Rules — ⌁ IV ⌁\n\n"
 
 async def start_verification(interaction: discord.Interaction, language: str = "fr"):
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
-        return await interaction.response.send_message("Action disponible uniquement sur le serveur.", ephemeral=True)
+        return await interaction.response.send_message(tr(language, "Action disponible uniquement sur le serveur.", "This action is only available on the server."), ephemeral=True)
     if interaction.channel_id not in VIGILE_CHANNELS:
-        return await interaction.response.send_message("Utilise le portail dans le salon Vigile.", ephemeral=True)
+        return await interaction.response.send_message(tr(language, "Utilise le portail dans le salon Vigile.", "Please use the Vigile verification portal."), ephemeral=True)
     if DB.approved_user(interaction.guild.id, interaction.user.id):
-        return await interaction.response.send_message("Tu es déjà membre validé.", ephemeral=True)
+        return await interaction.response.send_message(tr(language, "Tu es déjà membre validé.", "You have already been verified."), ephemeral=True)
     await interaction.response.defer(ephemeral=True, thinking=True)
     guild, member = interaction.guild, interaction.user
     existing = session_for(guild.id, member.id)
@@ -199,7 +217,7 @@ async def start_verification(interaction: discord.Interaction, language: str = "
             DB.db.execute("DELETE FROM sessions WHERE guild_id=? AND user_id=?", (guild.id, member.id))
     me = guild.me
     if not me or not me.guild_permissions.manage_channels:
-        return await interaction.followup.send("Impossible de créer ton espace privé. Préviens le staff (permission Gérer les salons manquante).", ephemeral=True)
+        return await interaction.followup.send(tr(language, "Impossible de créer ton espace privé. Préviens le staff (permission Gérer les salons manquante).", "Could not create your private channel. Please contact staff (Manage Channels permission missing)."), ephemeral=True)
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
         member: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True),
@@ -215,10 +233,14 @@ async def start_verification(interaction: discord.Interaction, language: str = "
         )
     except discord.HTTPException as exc:
         log.exception("Création du salon privé impossible")
-        return await interaction.followup.send(f"Impossible d'ouvrir la vérification : {exc}", ephemeral=True)
+        return await interaction.followup.send(tr(language, "Impossible d’ouvrir la vérification.", "Could not start verification. Please contact staff."), ephemeral=True)
     with DB.db:
         DB.db.execute("INSERT INTO sessions(guild_id,user_id,channel_id,step,origin_channel_id,language) VALUES (?,?,?,?,?,?)", (guild.id, member.id, channel.id, 'rules', interaction.channel_id, language))
-    await channel.send(f"{member.mention}\n" + (RULES_EN if language == "en" else RULES_FR), view=Rules(member.id, language))
+    await channel.send(
+        RULES_EN if language == "en" else RULES_FR,
+        view=Rules(member.id, language),
+        allowed_mentions=discord.AllowedMentions.none()
+    )
     jump = discord.ui.View(timeout=120)
     jump.add_item(discord.ui.Button(label="➡️ Open verification" if language == "en" else "➡️ Accéder à ma vérification", style=discord.ButtonStyle.link, url=channel.jump_url))
     await interaction.followup.send(
@@ -229,7 +251,7 @@ async def start_verification(interaction: discord.Interaction, language: str = "
     )
 
 
-BANNER_PATH = os.path.join(os.path.dirname(__file__), "iv_banner_haut_IV.png")
+BANNER_PATH = os.path.join(os.path.dirname(__file__), "iv_banner_haut_IV_v42.png")
 
 PORTAL_BODY_FR = PORTAL_TEXT_FR.partition("\n\n")[2] or PORTAL_TEXT_FR
 PORTAL_BODY_EN = PORTAL_TEXT_EN.partition("\n\n")[2] or PORTAL_TEXT_EN
@@ -239,13 +261,15 @@ class LanguageChoice(discord.ui.View):
     def __init__(self, lang: str = "fr"):
         super().__init__(timeout=180)
         self.lang = "en" if lang == "en" else "fr"
-        self.children[0].label = "🇬🇧 English" if self.lang == "fr" else "🇫🇷 Français"
+        self.children[0].label = "English" if self.lang == "fr" else "Français"
+        self.children[0].emoji = ENGLAND_FLAG if self.lang == "fr" else "🇫🇷"
         self.children[1].label = "Start verification" if self.lang == "en" else "Commencer ma vérification"
 
-    @discord.ui.button(label="🇬🇧 English", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="English", style=discord.ButtonStyle.secondary, row=0)
     async def toggle(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.lang = "en" if self.lang == "fr" else "fr"
-        self.children[0].label = "🇬🇧 English" if self.lang == "fr" else "🇫🇷 Français"
+        self.children[0].label = "English" if self.lang == "fr" else "Français"
+        self.children[0].emoji = ENGLAND_FLAG if self.lang == "fr" else "🇫🇷"
         self.children[1].label = "Start verification" if self.lang == "en" else "Commencer ma vérification"
         await interaction.response.edit_message(
             content=PORTAL_TEXT_EN if self.lang == "en" else PORTAL_TEXT_FR, view=self
@@ -261,13 +285,13 @@ class Portal(discord.ui.LayoutView):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(discord.ui.MediaGallery(
-            discord.MediaGalleryItem(media="attachment://iv_banner_haut_IV.png", description="Bannière IV — Million Lords")
+            discord.MediaGalleryItem(media="attachment://iv_banner_haut_IV_v42.png", description="Bannière IV — Million Lords")
         ))
         section = discord.ui.Section(
             discord.ui.TextDisplay("## 🛡️ Bienvenue sur ⌁ IV ⌁ | Million Lords"),
             accessory=discord.ui.Button(
                 style=discord.ButtonStyle.secondary,
-                emoji="🇫🇷",
+                emoji=ENGLAND_FLAG,
                 custom_id="vigile:portal:language",
             ),
         )
@@ -299,7 +323,7 @@ class PortalActions(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(emoji="🇫🇷", style=discord.ButtonStyle.secondary,
+    @discord.ui.button(emoji=ENGLAND_FLAG, style=discord.ButtonStyle.secondary,
                        custom_id="vigile:portal:language")
     async def language(self, interaction: discord.Interaction, button: discord.ui.Button):
         await portal_language_click(interaction)
@@ -321,24 +345,26 @@ class Rules(discord.ui.View):
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
         record = session_channel(interaction.channel_id)
         if not record or interaction.user.id != self.user_id or record['step'] != 'rules':
-            return await interaction.response.send_message("Cette étape n'est pas disponible pour toi.", ephemeral=True)
+            return await interaction.response.send_message(tr(record["language"] if record else "fr", "Cette étape n’est pas disponible pour toi.", "This step is not available to you."), ephemeral=True)
         set_step(record['guild_id'], record['user_id'], 'image')
-        await interaction.response.send_message("**Étape 2/3 : capture du profil**\nEnvoie ici une capture complète de ton profil de jeu, avec ton pseudo clairement visible. Formats PNG, JPG ou WebP.")
+        await interaction.response.send_message(tr(record["language"], "**Étape 2/3 : capture du profil**\nEnvoie ici une capture complète de ton profil de jeu, avec ton pseudo clairement visible. Formats PNG, JPG ou WebP.", "**Step 2/3: Profile screenshot**\nSend a complete screenshot of your game profile, with your username clearly visible. PNG, JPG or WebP."))
         button.disabled = True
         await interaction.message.edit(view=self)
 
 
 class Confirm(discord.ui.View):
-    def __init__(self, user_id, name, message_id):
+    def __init__(self, user_id, name, message_id, language="fr"):
         super().__init__(timeout=None)
         self.user_id, self.name, self.message_id = user_id, name, message_id
+        self.children[0].label = tr(language, "C’est mon pseudo", "That is my username")
+        self.children[1].label = tr(language, "Ce n’est pas mon pseudo", "That is not my username")
         self.children[0].custom_id = f"vigile:confirm:{message_id}"
         self.children[1].custom_id = f"vigile:redo:{message_id}"
 
     async def interaction_check(self, interaction):
         record = session_channel(interaction.channel_id)
         if not record or record['user_id'] != interaction.user.id or record['step'] != 'confirm':
-            await interaction.response.send_message("Confirmation non autorisée.", ephemeral=True)
+            await interaction.response.send_message(tr(record["language"] if record else "fr", "Confirmation non autorisée.", "Confirmation not authorized."), ephemeral=True)
             return False
         return True
 
@@ -349,7 +375,7 @@ class Confirm(discord.ui.View):
         try:
             original = await interaction.channel.fetch_message(self.message_id)
         except discord.HTTPException:
-            return await interaction.followup.send("Capture introuvable, recommence.", ephemeral=True)
+            return await interaction.followup.send(tr(record["language"], "Capture introuvable, recommence.", "Screenshot not found. Please try again."), ephemeral=True)
         await process_capture(original, confirmed_name=self.name)
         if DB.approved_user(record['guild_id'], record['user_id']):
             set_step(record['guild_id'], record['user_id'], 'done')
@@ -360,7 +386,7 @@ class Confirm(discord.ui.View):
             set_step(record['guild_id'], record['user_id'], 'image')
         for child in self.children: child.disabled = True
         await interaction.message.edit(view=self)
-        await interaction.followup.send("Confirmation prise en compte.", ephemeral=True)
+        await interaction.followup.send(tr(record["language"], "Confirmation prise en compte.", "Confirmation received."), ephemeral=True)
 
     @discord.ui.button(label="Ce n'est pas mon pseudo", style=discord.ButtonStyle.secondary, custom_id="vigile:redo:placeholder")
     async def no(self, interaction, button):
@@ -373,15 +399,15 @@ class Confirm(discord.ui.View):
                 result = await asyncio.to_thread(extract_name, data, MIN_CONFIDENCE)
                 await escalate_capture(original, data, result, 'Le joueur conteste le pseudo reconnu au deuxième essai')
             except (discord.HTTPException, ValueError):
-                await interaction.followup.send('Impossible de transmettre la capture. Contacte le staff.', ephemeral=True)
+                await interaction.followup.send(tr(record['language'], 'Impossible de transmettre la capture. Contacte le staff.', 'Could not forward the screenshot. Please contact staff.'), ephemeral=True)
                 return
             for child in self.children: child.disabled = True
             await interaction.message.edit(view=self)
-            await interaction.followup.send('Dossier transmis au staff.', ephemeral=True)
+            await interaction.followup.send(tr(record['language'], 'Dossier transmis au staff.', 'Your case has been sent to the moderators.'), ephemeral=True)
             return
         set_step(record['guild_id'], record['user_id'], 'image')
         for child in self.children: child.disabled = True
-        await interaction.response.edit_message(content='Envoie ta deuxième capture plus nette et complète.', view=self)
+        await interaction.response.edit_message(content=tr(record['language'], 'Envoie ta deuxième capture plus nette et complète.', 'Please send a clearer, complete second screenshot.'), view=self)
 
 
 async def publish_portals():
@@ -441,12 +467,12 @@ async def ensure_portal(channel_id: int) -> str:
             # Ne garder que la version avec bannière intégrée.
             # La migration se fait une fois, puis les contrôles ne republient rien.
             valid = [m for m in portals if m.flags.components_v2 and
-                     any(a.filename == "iv_banner_haut_IV.png" for a in m.attachments)]
+                     any(a.filename == "iv_banner_haut_IV_v42.png" for a in m.attachments)]
             keep = max(valid, key=lambda m: m.id) if valid else None
             if keep is None:
                 # Publier d'abord : une erreur d'envoi ne doit pas faire disparaître l'ancien portail.
                 keep = await channel.send(
-                    view=Portal(), file=discord.File(BANNER_PATH, filename="iv_banner_haut_IV.png")
+                    view=Portal(), file=discord.File(BANNER_PATH, filename="iv_banner_haut_IV_v42.png")
                 )
             # Supprimer uniquement les autres portails identifiés comme appartenant au bot.
             for old in portals:
@@ -647,10 +673,11 @@ class Review(discord.ui.View):
                 set_step(guild.id, member.id, "done")
                 asyncio.create_task(close_session(guild.id, member.id))
                 outcome = f"Validé par {interaction.user.mention} : {discord.utils.escape_markdown(name)}"
-                try:
-                    await member.send(f"✅ Profil validé : ton surnom est **{discord.utils.escape_markdown(name)}** et le rôle Membres a été attribué.")
-                except discord.HTTPException:
-                    pass
+                if VIGILE_SEND_DM:
+                    try:
+                        await member.send(f"✅ Profil validé : **{discord.utils.escape_markdown(name)}**.")
+                    except discord.HTTPException:
+                        pass
             else:
                 DB.set_status(self.case_id, "rejected" if action == "reject" else "retry", interaction.user.id)
                 if member and action == "reject":
@@ -659,7 +686,7 @@ class Review(discord.ui.View):
                 elif member and action == "retry":
                     set_step(guild.id, member.id, "image")
                 outcome = ("Refusé" if action == "reject" else "Nouvelle capture demandée") + f" par {interaction.user.mention}"
-                if member:
+                if member and VIGILE_SEND_DM:
                     try:
                         await member.send("❌ Ta capture a été refusée." if action == "reject" else "📸 Merci de renvoyer une capture complète et nette de ton profil dans le salon Vigile.")
                     except discord.HTTPException:
@@ -742,10 +769,18 @@ async def on_message(message: discord.Message):
     attachments = [a for a in message.attachments if
                    (a.content_type or '').lower().split(';')[0] in ('image/png', 'image/jpeg', 'image/webp')]
     if not attachments:
-        await message.reply('📸 Please send a PNG, JPG or WebP screenshot of your profile.' if record['language'] == 'en' else '📸 Envoie une capture PNG, JPG ou WebP de ton profil.', mention_author=False)
+        if should_warn_invalid(message.guild.id, message.author.id, "format"):
+            await message.reply(
+                '📸 Please send a PNG, JPG or WebP screenshot of your profile.' if record['language'] == 'en' else '📸 Envoie une capture PNG, JPG ou WebP de ton profil.',
+                mention_author=False, allowed_mentions=discord.AllowedMentions.none()
+            )
         return
     if attachments[0].size > MAX_BYTES:
-        await message.reply('⚠️ Image too large (8 MB maximum).' if record['language'] == 'en' else '⚠️ Image trop volumineuse (8 Mo maximum).', mention_author=False)
+        if should_warn_invalid(message.guild.id, message.author.id, "size"):
+            await message.reply(
+                '⚠️ Image too large (8 MB maximum).' if record['language'] == 'en' else '⚠️ Image trop volumineuse (8 Mo maximum).' ,
+                mention_author=False, allowed_mentions=discord.AllowedMentions.none()
+            )
         return
     # Verrou par joueur : deux images envoyées simultanément ne créent pas deux dossiers.
     lock = locks.setdefault(('upload', message.guild.id, message.author.id), asyncio.Lock())
@@ -767,14 +802,13 @@ async def on_message(message: discord.Message):
             if reason is None:
                 set_step(message.guild.id, message.author.id, 'confirm')
                 await message.reply(
-                    f'**Étape 3/3 — Essai {attempt}/2**\nPseudo détecté : **{discord.utils.escape_markdown(result.name)}**. Est-ce bien ton pseudo ?',
-                    view=Confirm(message.author.id, result.name, message.id),
+                    tr(record['language'], f'**Étape 3/3 — Essai {attempt}/2**\nPseudo détecté : **{discord.utils.escape_markdown(result.name)}**. Est-ce bien ton pseudo ?', f'**Step 3/3 — Attempt {attempt}/2**\nDetected username: **{discord.utils.escape_markdown(result.name)}**. Is this your username?'),
+                    view=Confirm(message.author.id, result.name, message.id, record['language']),
                     mention_author=False, allowed_mentions=discord.AllowedMentions.none())
                 return
         if retry_or_escalate(message.guild.id, message.author.id, reason):
             await message.reply(
-                f'⚠️ Première tentative non validée : {reason}.\n'
-                '**Tu as droit à un deuxième essai.** Envoie une nouvelle capture avec le pseudo bien visible.',
+                tr(record['language'], f'⚠️ Première tentative non validée : {reason}.\n**Tu as droit à un deuxième essai.** Envoie une nouvelle capture avec le pseudo bien visible.', '⚠️ First attempt unsuccessful.\n**You have one more attempt.** Send a new screenshot with your username clearly visible.'),
                 mention_author=False)
             return
         await escalate_capture(message, data if result else b'', result, reason)
@@ -827,12 +861,12 @@ async def process_capture(message: discord.Message, confirmed_name=None):
                                      record['origin_channel_id'])
             if case_id is not None:
                 DB.approve(case_id, result.name)
-            await message.reply(f'✅ Bienvenue **{discord.utils.escape_markdown(result.name)}** ! Rôle Membres attribué. Fermeture dans 10 secondes.', mention_author=False)
+            await message.reply(tr(record['language'], f'✅ Bienvenue **{discord.utils.escape_markdown(result.name)}** ! Rôle Membres attribué. Fermeture dans 10 secondes.', f'✅ Welcome **{discord.utils.escape_markdown(result.name)}**! Member role granted. This channel will close in 10 seconds.'), mention_author=False)
             set_step(message.guild.id, user.id, 'done')
             asyncio.create_task(close_session(message.guild.id, user.id))
             return
     if retry_or_escalate(message.guild.id, user.id, reason):
-        await message.reply(f'⚠️ {reason}. Tu peux envoyer une deuxième capture.', mention_author=False)
+        await message.reply(tr(record['language'], f'⚠️ {reason}. Tu peux envoyer une deuxième capture.', '⚠️ Verification failed. You can send a second screenshot.'), mention_author=False)
     else:
         await escalate_capture(message, data, result, reason)
 
@@ -876,19 +910,19 @@ async def setup_hook():
         if session['step'] == 'rules':
             bot.add_view(Rules(session['user_id'], session['language']))
     # Les confirmations actives sont restaurées depuis les messages persistés.
-    for session in DB.db.execute("SELECT channel_id,user_id FROM sessions WHERE step='confirm'").fetchall():
+    for session in DB.db.execute("SELECT channel_id,user_id,language FROM sessions WHERE step='confirm'").fetchall():
         channel = bot.get_channel(session['channel_id'])
         if channel:
             try:
                 async for msg in channel.history(limit=15):
-                    if msg.author.id == bot.user.id and msg.components and 'Pseudo détecté' in msg.content:
+                    if msg.author.id == bot.user.id and msg.components and ('Pseudo détecté' in msg.content or 'Detected username' in msg.content):
                         # L'identifiant de capture est extrait du custom_id de la confirmation.
                         cid = msg.components[0].children[0].custom_id
                         source_id = int(cid.rsplit(':', 1)[-1])
                         original = await channel.fetch_message(source_id)
                         result = await asyncio.to_thread(extract_name, await original.attachments[0].read(), MIN_CONFIDENCE)
                         if result.name:
-                            bot.add_view(Confirm(session['user_id'], result.name, source_id))
+                            bot.add_view(Confirm(session['user_id'], result.name, source_id, session['language']))
                         break
             except (discord.HTTPException, IndexError, ValueError, AttributeError):
                 log.warning("Confirmation non restaurée dans %s", session['channel_id'])

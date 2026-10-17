@@ -160,3 +160,12 @@ La pièce jointe `iv_banner_originale.png` est une découpe exacte (sans génér
 
 ## V4.1 : bannière haute originale
 Découpe directe de la première bannière de l’image à deux bannières, sans régénération ni retouche. Asset : `iv_banner_haut_IV.png` (2098 x 340). Le nouveau nom de pièce jointe déclenche une seule migration du portail, et les anciens messages sont nettoyés.
+
+
+## V4.3 — Notifications discrètes
+- Aucun ping à la création du salon privé (le joueur y accède via le bouton).
+- Aucun message privé automatique après décision modo par défaut ; activer `VIGILE_SEND_DM=true` si souhaité.
+- Un avertissement maximum par minute et par type de problème (format ou taille) pour un joueur.
+- Les deux tentatives OCR, les alertes staff après deuxième échec, et les réponses éphémères restent en place.
+- Les alertes staff n'utilisent aucune mention ping ; les dossiers sont dédupliqués en base.
+- Le bot continue à répondre aux actions importantes, sans supprimer les confirmations de validation.
