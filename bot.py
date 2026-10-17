@@ -418,86 +418,102 @@ async def publish_portals():
             log.exception("Erreur imprévue de surveillance du portail %s", channel_id)
 
 
+# Anti-boucle : une publication au maximum toutes les cinq minutes par salon,
+# sauf disparition explicitement confirmée du message suivi.
+portal_last_publish = {}
+PORTAL_PUBLISH_COOLDOWN = 300
+PORTAL_BANNER_FILENAME = "iv_banner_haut_IV_v42.png"
+
+
 def is_vigile_portal(message: discord.Message) -> bool:
     if not bot.user or message.author.id != bot.user.id:
         return False
-    if ("Bienvenue sur" in (message.content or "") and "Million Lords" in (message.content or "")):
+    # La bannière est le marqueur le plus fiable des portails Components V2.
+    if any(a.filename.startswith("iv_banner") for a in message.attachments):
         return True
-    if "VIGILE IA — PORTAIL D'ACCUEIL" in (message.content or ""):
+    content = message.content or ""
+    if ("VIGILE IA — PORTAIL D'ACCUEIL" in content or
+        ("Bienvenue sur" in content and "Million Lords" in content)):
         return True
-    for component in message.components:
-        for child in getattr(component, "children", []):
-            if "Million Lords" in getattr(child, "content", ""):
-                return True
-        if "vigile:portal" in str(component):
+    def contains_portal(component):
+        if "vigile:portal:" in str(getattr(component, "custom_id", "")):
             return True
-    return False
+        if "Million Lords" in str(getattr(component, "content", "")):
+            return True
+        return any(contains_portal(child) for child in getattr(component, "children", []) or [])
+    return any(contains_portal(component) for component in message.components)
 
 
-async def ensure_portal(channel_id: int) -> str:
+async def ensure_portal(channel_id: int, *, cleanup: bool = False) -> str:
     lock = portal_publish_locks.setdefault(channel_id, asyncio.Lock())
     async with lock:
         channel = bot.get_channel(channel_id)
         if channel is None:
             try:
                 channel = await bot.fetch_channel(channel_id)
-            except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
-                log.error("Salon Vigile %s inaccessible : %r", channel_id, exc)
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                log.exception("Salon Vigile inaccessible %s", channel_id)
                 return "Salon inaccessible."
         if not isinstance(channel, discord.TextChannel):
             return "Salon non textuel."
         try:
-            # Rechercher dans l'historique, pas uniquement dans SQLite :
-            # un redéploiement ou une ancienne version peut avoir créé des doublons.
+            row = DB.db.execute("SELECT message_id FROM portal_messages WHERE channel_id=?", (channel_id,)).fetchone()
+            # Chemin normal : aucune recherche ni modification si le portail suivi existe.
+            if row and not cleanup:
+                try:
+                    tracked = await channel.fetch_message(row['message_id'])
+                    if is_vigile_portal(tracked):
+                        return "Portail déjà présent : aucune modification."
+                    # Ne rien publier si le message existe mais est mal reconnu.
+                    log.error("Portail suivi %s présent mais non reconnu ; publication bloquée", row['message_id'])
+                    return "Portail suivi non reconnu : publication bloquée par sécurité."
+                except discord.NotFound:
+                    pass
             portals = []
             async for message in channel.history(limit=500):
                 if is_vigile_portal(message):
                     portals.append(message)
-            tracked = DB.db.execute(
-                "SELECT message_id FROM portal_messages WHERE channel_id=?", (channel_id,)
-            ).fetchone()
-            if tracked and tracked["message_id"] not in {m.id for m in portals}:
+            # Inclure le message suivi même s'il est plus ancien que les 500 derniers.
+            if row and row['message_id'] not in {m.id for m in portals}:
                 try:
-                    old_tracked = await channel.fetch_message(tracked["message_id"])
-                    if is_vigile_portal(old_tracked):
-                        portals.append(old_tracked)
+                    tracked = await channel.fetch_message(row['message_id'])
+                    if is_vigile_portal(tracked):
+                        portals.append(tracked)
                 except discord.NotFound:
                     pass
-            # Un portail V2 récent est conservé en priorité.
-            # Ne garder que la version avec bannière intégrée.
-            # La migration se fait une fois, puis les contrôles ne republient rien.
-            valid = [m for m in portals if m.flags.components_v2 and
-                     any(a.filename == "iv_banner_haut_IV_v42.png" for a in m.attachments)]
-            keep = max(valid, key=lambda m: m.id) if valid else None
-            if keep is None:
-                # Publier d'abord : une erreur d'envoi ne doit pas faire disparaître l'ancien portail.
-                keep = await channel.send(
-                    view=Portal(), file=discord.File(BANNER_PATH, filename="iv_banner_haut_IV_v42.png")
-                )
-            # Supprimer uniquement les autres portails identifiés comme appartenant au bot.
-            for old in portals:
-                if old.id != keep.id:
-                    try:
-                        await old.delete()
-                    except (discord.Forbidden, discord.HTTPException):
-                        log.exception("Impossible de supprimer le doublon %s dans %s", old.id, channel_id)
+            if portals:
+                # Conserver le plus récent. Ne pas imposer une nouvelle publication
+                # pour changer une image ou une version : c'était la cause de la boucle.
+                keep = max(portals, key=lambda m: m.id)
+                with DB.db:
+                    DB.db.execute("INSERT OR REPLACE INTO portal_messages(channel_id,message_id) VALUES (?,?)", (channel_id, keep.id))
+                if cleanup:
+                    for old in portals:
+                        if old.id != keep.id:
+                            try:
+                                await old.delete()
+                            except discord.HTTPException:
+                                log.exception("Échec suppression doublon %s", old.id)
+                return f"Portail conservé ({keep.id}) ; {len(portals)-1} doublon(s)" + (" nettoyé(s)." if cleanup else " détecté(s).")
+            # Aucun portail retrouvé : délai anti-spam, même si la DB est éphémère.
+            now = time.monotonic()
+            if now - portal_last_publish.get(channel_id, -1e12) < PORTAL_PUBLISH_COOLDOWN:
+                return "Publication temporairement bloquée (anti-spam 5 min)."
+            # Enregistrer AVANT l'envoi pour empêcher les boucles après erreurs réseau.
+            portal_last_publish[channel_id] = now
+            sent = await channel.send(view=Portal(), file=discord.File(BANNER_PATH, filename=PORTAL_BANNER_FILENAME))
             with DB.db:
-                DB.db.execute(
-                    "INSERT OR REPLACE INTO portal_messages(channel_id,message_id) VALUES (?,?)",
-                    (channel_id, keep.id),
-                )
-            log.info("Portail unique dans %s : %s (%s anciens)", channel_id, keep.id, max(0, len(portals)-1))
-            return "Portail présent, doublons nettoyés."
-        except discord.Forbidden:
-            log.exception("Permissions insuffisantes pour lire ou nettoyer le portail %s", channel_id)
-            return "Permissions manquantes : Lire l'historique, Envoyer et Gérer les messages."
+                DB.db.execute("INSERT OR REPLACE INTO portal_messages(channel_id,message_id) VALUES (?,?)", (channel_id, sent.id))
+            log.info("Portail publié une seule fois dans %s : %s", channel_id, sent.id)
+            return "Portail publié."
         except discord.HTTPException:
-            log.exception("Impossible de publier/nettoyer le portail %s", channel_id)
-            return "Erreur Discord : consulter les logs Coolify."
+            log.exception("Erreur vérification portail %s", channel_id)
+            return "Erreur Discord : publication suspendue."
 
 
 @tasks.loop(seconds=60)
 async def portal_healthcheck():
+    # Contrôle non destructif. Jamais de nettoyage automatique en boucle.
     await publish_portals()
 
 
@@ -519,7 +535,7 @@ async def vigile_portail(interaction: discord.Interaction):
         return
     await interaction.response.defer(ephemeral=True)
     try:
-        result = await ensure_portal(interaction.channel_id)
+        result = await ensure_portal(interaction.channel_id, cleanup=True)
     except Exception:
         log.exception("Erreur commande vigile-portail, salon %s", interaction.channel_id)
         result = "Erreur interne : consulte les logs Coolify."

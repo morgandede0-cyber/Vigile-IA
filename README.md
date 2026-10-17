@@ -169,3 +169,12 @@ Découpe directe de la première bannière de l’image à deux bannières, sans
 - Les deux tentatives OCR, les alertes staff après deuxième échec, et les réponses éphémères restent en place.
 - Les alertes staff n'utilisent aucune mention ping ; les dossiers sont dédupliqués en base.
 - Le bot continue à répondre aux actions importantes, sans supprimer les confirmations de validation.
+
+## V4.4 — Correction boucle de portails
+- La surveillance ne republie jamais un portail existant simplement parce que sa version ou son image a changé.
+- Détection robuste des portails Components V2 par pièce jointe, contenu et identifiants de boutons imbriqués.
+- L'identifiant enregistré en SQLite est vérifié directement ; si le message existe mais ne peut être reconnu, le bot n'en publie pas un autre.
+- Nettoyage des doublons uniquement sur commande `/vigile-portail` dans les salons autorisés ; la surveillance automatique ne supprime aucun message.
+- Si le portail est réellement absent, publication limitée à une fois toutes les cinq minutes par salon (en mémoire du processus).
+- Pour nettoyer les anciens doublons : utiliser `/vigile-portail` une fois dans le salon principal puis une fois dans le salon test.
+- Si plusieurs instances Coolify du bot utilisent le même token et surveillent les mêmes salons, arrêter les instances supplémentaires ; une protection locale ne suffit pas entre plusieurs processus.
