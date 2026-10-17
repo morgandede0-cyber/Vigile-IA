@@ -229,6 +229,8 @@ async def start_verification(interaction: discord.Interaction, language: str = "
     )
 
 
+BANNER_PATH = os.path.join(os.path.dirname(__file__), "iv_banner_haut_IV.png")
+
 PORTAL_BODY_FR = PORTAL_TEXT_FR.partition("\n\n")[2] or PORTAL_TEXT_FR
 PORTAL_BODY_EN = PORTAL_TEXT_EN.partition("\n\n")[2] or PORTAL_TEXT_EN
 
@@ -258,6 +260,9 @@ class Portal(discord.ui.LayoutView):
     """Components V2: drapeau en accessoire du titre, en haut à droite."""
     def __init__(self):
         super().__init__(timeout=None)
+        self.add_item(discord.ui.MediaGallery(
+            discord.MediaGalleryItem(media="attachment://iv_banner_haut_IV.png", description="Bannière IV — Million Lords")
+        ))
         section = discord.ui.Section(
             discord.ui.TextDisplay("## 🛡️ Bienvenue sur ⌁ IV ⌁ | Million Lords"),
             accessory=discord.ui.Button(
@@ -281,7 +286,7 @@ class Portal(discord.ui.LayoutView):
 async def portal_language_click(interaction: discord.Interaction):
     # La langue ne change que pour ce joueur : le portail reste en français pour les autres.
     await interaction.response.send_message(
-        PORTAL_TEXT_FR, view=LanguageChoice("fr"), ephemeral=True
+        PORTAL_TEXT_EN, view=LanguageChoice("en"), ephemeral=True
     )
 
 
@@ -433,11 +438,16 @@ async def ensure_portal(channel_id: int) -> str:
                 except discord.NotFound:
                     pass
             # Un portail V2 récent est conservé en priorité.
-            valid = [m for m in portals if m.flags.components_v2]
+            # Ne garder que la version avec bannière intégrée.
+            # La migration se fait une fois, puis les contrôles ne republient rien.
+            valid = [m for m in portals if m.flags.components_v2 and
+                     any(a.filename == "iv_banner_haut_IV.png" for a in m.attachments)]
             keep = max(valid, key=lambda m: m.id) if valid else None
             if keep is None:
                 # Publier d'abord : une erreur d'envoi ne doit pas faire disparaître l'ancien portail.
-                keep = await channel.send(view=Portal())
+                keep = await channel.send(
+                    view=Portal(), file=discord.File(BANNER_PATH, filename="iv_banner_haut_IV.png")
+                )
             # Supprimer uniquement les autres portails identifiés comme appartenant au bot.
             for old in portals:
                 if old.id != keep.id:

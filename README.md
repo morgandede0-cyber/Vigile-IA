@@ -144,3 +144,19 @@ Le portail public affiche un bouton 🌐 EN sur la première rangée et un bouto
 - Nouveau portail envoyé avant nettoyage des anciens, et suppression de doublons sans arrêter la surveillance en cas de refus.
 - **À corriger dans Discord/Coolify** : accès du bot au salon principal `1522707744828821765` (403 Missing Access), et `MEMBER_ROLE_ID` correspondant à un rôle existant dans le serveur (les logs indiquent `rôle principal=False`).
 - Les permissions et le rôle ne peuvent pas être réparés depuis le code.
+
+
+## V3.9 — Bannière IV et langue
+- Bannière supérieure extraite de la création IV, intégrée dans le **même message** Components V2 via MediaGallery, immédiatement au-dessus du titre (espacement contrôlé par Discord).
+- Un clic sur le drapeau 🇫🇷 du portail affiche immédiatement la version anglaise dans une réponse privée, avec le bouton de démarrage anglais. Le bouton 🇫🇷 permet de revenir au français. Le choix est conservé dans la session et le règlement.
+- Au premier déploiement, le portail V2 sans bannière est remplacé par le nouveau ; les anciens portails du bot sont supprimés. Un portail avec `iv_banner.png` est conservé au prochain redémarrage.
+- Permissions : voir salon, lire historique, envoyer et gérer les messages, joindre des fichiers.
+- Attention : l'espacement image/texte est celui imposé par Discord Components V2.
+
+
+## V4.0 — Bannière originale
+La pièce jointe `iv_banner_originale.png` est une découpe exacte (sans génération ni retouche) de la première bannière : source 2098×749, recadrage y=24..346. Elle est intégrée en MediaGallery au-dessus du titre dans le même message Components V2. Le nouveau nom de fichier déclenche une migration unique du portail et le nettoyage des doublons. Les marges natives de Discord restent imposées par son interface.
+
+
+## V4.1 : bannière haute originale
+Découpe directe de la première bannière de l’image à deux bannières, sans régénération ni retouche. Asset : `iv_banner_haut_IV.png` (2098 x 340). Le nouveau nom de pièce jointe déclenche une seule migration du portail, et les anciens messages sont nettoyés.
